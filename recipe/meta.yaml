@@ -1,0 +1,64 @@
+{% set name = "CNVoyant" %}
+{% set version = "0.1.16" %}
+
+package:
+  name: "{{ name|lower }}"
+  version: "{{ version }}"
+
+source:
+  url: "https://pypi.io/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz"
+  sha256: d215aab0d30a5a62aac5cab07723682773616a8fb57fae6520b6082eb6f72590
+
+build:
+  number: 0
+  script: "{{ PYTHON }} -m pip install . -vv"
+
+requirements:
+  host:
+    - numpy =1.26
+    - onnxruntime
+    - pandas
+    - pickleshare
+    - pip
+    - progressbar
+    - pysam
+    - python =3.10
+    - pyvcf
+    - requests
+    - scikit-learn
+    - setuptools
+    - xgboost
+  run:
+    - numpy =1.26
+    - onnxruntime
+    - pandas
+    - pickleshare
+    - progressbar
+    - pysam
+    - python =3.10
+    - pyvcf
+    - requests
+    - scikit-learn
+    - setuptools
+    - xgboost
+
+test:
+  imports:
+    - CNVoyant
+    - CNVoyant.classifier
+    - CNVoyant.dependency_builder
+    - CNVoyant.feature_builder
+    - CNVoyant.liftover
+
+about:
+  home: "https://github.com/Rob-Schuetz/CNVoyant"
+  license: MIT
+  license_family: MIT
+  license_file: 
+  summary: "Copy Number Variant Pathogenicity Classifier"
+  doc_url: 
+  dev_url: 
+
+extra:
+  recipe-maintainers:
+    - your-github-id-here

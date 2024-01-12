@@ -1,0 +1,4 @@
+include CNVoyant/data/hi_ti_gene.csv
+include CNVoyant/data/gene_positions.csv
+include CNVoyant/liftover/paths.json
+include CNVoyant/classifier/models/*

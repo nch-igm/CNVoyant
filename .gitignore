@@ -1,0 +1,7 @@
+dist
+CNVoyant.egg-info
+build
+CNVoyant/data/*
+CNVoyant/liftover/temp
+!CNVoyant/data/hi_ti_gene.csv
+!CNVoyant/data/gene_positions.csv

@@ -1,0 +1,5 @@
+{
+    "liftover_executable_path": "src/liftover",
+    "liftover_temp_dir": "temp",
+    "liftover_hg19tohg38_chain_path": "src/hg19ToHg38.over.chain.gz"
+}
