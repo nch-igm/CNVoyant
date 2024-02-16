@@ -20,7 +20,9 @@ class DependencyBuilder:
     def __init__(self, data_dir: str = os.path.join(os.path.dirname(__file__), '..', 'data'), gnomadSV_version: str = '2.1'):
         self.data_dir = data_dir
         self.gnomadSV_version = gnomadSV_version
-    
+        self.repo_url = 'https://github.com/yourusername/yourrepository.git'
+        self.target_dir = './path/to/save/lfs/files'
+
 
     def worker(self, cmd):
         parsed_cmd = shlex.split(cmd)
@@ -30,45 +32,70 @@ class DependencyBuilder:
         return out.decode() if out else err.decode()
 
 
-    # def get_gnomad_frequencies(self, vcf_path, output_path):
+    def _is_git_lfs_installed(self):
+        try:
+            subprocess.run(['git', 'lfs', 'version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return True
+        except subprocess.CalledProcessError:
+            return False
 
-    #     vcf_reader = vcf.Reader(filename = vcf_path, compressed=True, encoding='ISO-8859-1')
 
-    #     rows = []
+    def get_lfs_files(self):
 
-    #     for record in vcf_reader:
-    #         # print(record.INFO['SVTYPE'], record.FILTER)
-    #         if record.INFO['SVTYPE'] in ('DEL','DUP') and record.FILTER == []:
-    #             chrom = record.CHROM
-    #             pos1 = record.POS
-    #             pos2 = record.INFO['END']
-    #             var_type = 'DUP' if record.INFO['SVTYPE'] == 'DUP' else 'DEL'
-    #             freq = record.INFO['AC'][0] / record.INFO['AN']
-    #             rows.append([chrom, pos1, pos2, var_type, freq])
+        # Check if Git LFS is installed
+        if not self._is_git_lfs_installed():
+            print("Git LFS is not installed. Please install Git LFS first.")
+            return False
+        
+        # Clone LFS files or pull from the repository
+        if not os.path.exists(self.target_dir):
+            os.makedirs(self.target_dir)
+        p = worker(f"git lfs clone {self.repo_url} {self.target_dir}")
+        
+        # Additional steps could include verifying the integrity of the files
+        print("LFS files downloaded successfully.")
+        return True
 
-    #     df = pd.DataFrame(rows)
-    #     df.columns = ['chrom','start','stop','type','pop_freq']
-    #     df.to_csv(output_path, index = False)
+
+    def get_gnomad_frequencies(self, vcf_path, output_path):
+
+        vcf_reader = vcf.Reader(filename = vcf_path, compressed=True, encoding='ISO-8859-1')
+
+        rows = []
+
+        for record in vcf_reader:
+            # print(record.INFO['SVTYPE'], record.FILTER)
+            if record.INFO['SVTYPE'] in ('DEL','DUP') and record.FILTER == []:
+                chrom = record.CHROM
+                pos1 = record.POS
+                pos2 = record.INFO['END']
+                var_type = 'DUP' if record.INFO['SVTYPE'] == 'DUP' else 'DEL'
+                freq = record.INFO['AC'][0] / record.INFO['AN']
+                rows.append([chrom, pos1, pos2, var_type, freq])
+
+        df = pd.DataFrame(rows)
+        df.columns = ['chrom','start','stop','type','pop_freq']
+        df.to_csv(output_path, index = False)
 
         
     
-    # def build_gnomad_db(self):
-    #     """
-    #     gnomadSV data is needed in order to generate population frequencies for 
-    #     the indicated CNVs. It is quite large when unzipped (~2GB). Be sure to 
-    #     account for this before running.
-    #     """
-    #     gnomad_path = os.path.join(self.data_dir, f'gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz')
-    #     gnomad_df_path = os.path.join(self.data_dir, 'gnomad_frequencies.csv')
-    #     if not os.path.exists(gnomad_df_path):
-    #         url = f"https://storage.googleapis.com/gcp-public-data--gnomad/papers/2019-sv/gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz"
-    #         cmd = f"""
-    #             curl -s "{url}" -o {gnomad_path}
-    #         """
-    #         p = self.worker(cmd)
+    def build_gnomad_db(self):
+        """
+        gnomadSV data is needed in order to generate population frequencies for 
+        the indicated CNVs. It is quite large when unzipped (~2GB). Be sure to 
+        account for this before running.
+        """
+        gnomad_path = os.path.join(self.data_dir, f'gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz')
+        gnomad_df_path = os.path.join(self.data_dir, 'gnomad_frequencies.csv')
+        if not os.path.exists(gnomad_df_path):
+            url = f"https://storage.googleapis.com/gcp-public-data--gnomad/papers/2019-sv/gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz"
+            cmd = f"""
+                curl -s "{url}" -o {gnomad_path}
+            """
+            p = self.worker(cmd)
 
-    #         # Parse gnomAD
-    #         self.get_gnomad_frequencies(gnomad_path, gnomad_df_path)
+            # Parse gnomAD
+            self.get_gnomad_frequencies(gnomad_path, gnomad_df_path)
 
 
     def build_breakpoints(self):

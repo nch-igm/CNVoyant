@@ -6,3 +6,4 @@ CNVoyant/liftover/temp
 !CNVoyant/data/hi_ti_gene.csv
 !CNVoyant/data/gene_positions.csv
 *.cpython*
+CNVoyant/classifier/models/*_model.pickle

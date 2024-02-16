@@ -4,10 +4,8 @@ import pickle
 import pandas as pd
 import numpy as np
 from sklearn import ensemble
-# import xgboost
 from sklearn.pipeline import Pipeline
 from sklearn.calibration import CalibratedClassifierCV
-# import onnxruntime as rt
 import progressbar
 
 
@@ -16,12 +14,12 @@ class Classifier():
     def __init__(self, normalize_input = True):
         self.random_seed = 42
         self.root_path = os.path.dirname(__file__)
-        self.onnx = True
+        self.re_trained = False
         self.dup_model = None
         self.del_model = None
         self.norm = normalize_input
 
-    def train(self, input: pd.DataFrame):
+    def train(self, input: pd.DataFrame, label: str):
         """
         Generate duplication and deletion models based on previously discovered
         optimal hyper-parameters.
@@ -52,8 +50,6 @@ class Classifier():
             'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','%HI','pLI',
             'LOEUF','GC_CONTENT','POP_FREQ','CLINVAR_DENSITY','PHYLOP_SCORE',
             'PHASTCONS_SCORE'] + hs_ts_cols
-
-        label = 'LABEL'
 
         # Divide training data by CNV type
         XY = input.copy()
@@ -108,17 +104,6 @@ class Classifier():
             'max_features': 'sqrt','max_depth': 20,'criterion': 'gini',
             'class_weight': None,'ccp_alpha': 0.0,'bootstrap': False}
         
-        # rf_dup = {'n_estimators': 275, 'min_weight_fraction_leaf': 0.0,
-        #     'min_samples_split': 2,'min_samples_leaf': 3,'max_samples': 1.0,
-        #     'max_features': 'sqrt','max_depth': None,'criterion': 'entropy',
-        #     'class_weight': None,'ccp_alpha': 0.0,'bootstrap': True}
-
-        
-        # xgb_dup = {
-        #     'tree_method': 'approx', 'reg_lambda': 1, 'reg_alpha': 0,
-        #     'n_estimators': 100, 'max_depth': 10, 'gamma': 0, 'eta': 0.1, 
-        #     'booster': 'gbtree', 'base_score': 0.5
-        #  }
         
         # Generate models
         bar.update(1)
@@ -142,22 +127,12 @@ class Classifier():
         self.dup_calibrated_model = CalibratedClassifierCV(self.dup_model, method='isotonic')
         self.dup_calibrated_model.fit(X_dup, Y_dup)
 
-        # self.dup_model = xgboost.XGBClassifier(
-        #     **xgb_dup,
-        #     random_state = self.random_seed
-        # ).fit(X_dup, Y_dup)
-
 
         bar.update(3)
         bar_widgets[0] = progressbar.FormatLabel('Model training complete')
 
-        # self.pipe = Pipeline([('xgb', xgboost.XGBClassifier(
-        #     **xgb_dup,
-        #     random_state = self.random_seed
-        # ))]).fit(X_dup, Y_dup)
 
-
-        self.onnx = False
+        self.re_trained = True
 
 
     def predict(self, input: pd.DataFrame):
@@ -221,33 +196,23 @@ class Classifier():
         bar_widgets[0] = progressbar.FormatLabel('Obtaining DEL predictions')
         bar.update(1)
 
-        if self.onnx:
-
-            x = 1
+        if not self.re_trained:
             
-            # sess = rt.InferenceSession(os.path.join(self.root_path, 'models', "del.onnx"))
-            # input_name = sess.get_inputs()[0].name
-            # del_pred = sess.run(None, {input_name: np.array(X_del, dtype = 'f')})
-            # del_pred = pd.DataFrame(del_pred[1]).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
-            
-            # bar_widgets[0] = progressbar.FormatLabel('Obtaining DUP predictions')
-            # bar.update(2)
+            with open(os.path.join(self.root_path, 'models', 'del_model.pickle'), 'rb') as f:
+                self.del_calibrated_model = pickle.load(f)
 
-            # sess = rt.InferenceSession(os.path.join(self.root_path, 'models', "dup.onnx"))
-            # input_name = sess.get_inputs()[0].name
-            # dup_pred = sess.run(None, {input_name: np.array(X_dup, dtype = 'f')})
-            # dup_pred = pd.DataFrame(dup_pred[1]).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
+            with open(os.path.join(self.root_path, 'models', 'dup_model.pickle'), 'rb') as f:
+                self.del_calibrated_model = pickle.load(f)
 
-        else:
+        del_pred = self.del_calibrated_model.predict_proba(X_del)
+        del_pred = pd.DataFrame(del_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
 
-            del_pred = self.del_calibrated_model.predict_proba(X_del)
-            del_pred = pd.DataFrame(del_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
+        bar_widgets[0] = progressbar.FormatLabel('Obtaining DUP predictions')
+        bar.update(2)
 
-            bar_widgets[0] = progressbar.FormatLabel('Obtaining DUP predictions')
-            bar.update(2)
+        dup_pred = self.dup_calibrated_model.predict_proba(X_dup)
+        dup_pred = pd.DataFrame(dup_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
 
-            dup_pred = self.dup_calibrated_model.predict_proba(X_dup)
-            dup_pred = pd.DataFrame(dup_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
 
         bar_widgets[0] = progressbar.FormatLabel('Reformatting and saving predictions')
         bar.update(3)
