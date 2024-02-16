@@ -4,9 +4,10 @@ import pickle
 import pandas as pd
 import numpy as np
 from sklearn import ensemble
-import xgboost
+# import xgboost
 from sklearn.pipeline import Pipeline
-import onnxruntime as rt
+from sklearn.calibration import CalibratedClassifierCV
+# import onnxruntime as rt
 import progressbar
 
 
@@ -37,31 +38,40 @@ class Classifier():
             widgets=bar_widgets)
         bar.start()
 
-        # Limit to feature, label, and CNV type columns
-        # feature_cols = [
-        #     'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','TEL_DIST', 
-        #     'HI_SCORE','TS_SCORE','%HI','pLI','LOEUF','GC_CONTENT', 
-        #     'POP_FREQ','CLINVAR_DENSITY','P_TRIPLO','P_HAPLO','gnomad_oe_lof',
-        #     'gnomad_oe_lof_upper','gnomad_pLI','gnomad_lof_z','gnomad_mis_z',
-        #     'gnomad_oe_mis_upper','episcore','sHet','exon_phastcons','hurles_hi',
-        #     'rvis','promoter_cpg_count','eds','promoter_phastcons','cds_length',
-        #     'gnomad_pNull'
-        # ]
+        hs_ts_cols = []
+        hi_ts = ['HI','TS']
+        hi_ts_cols = ['NO_EVIDENCE','LITTLE_EVIDENCE','EMERGING_EVIDENCE',
+                'SUFFICIENT_EVIDENCE','AUTOSOMAL_RECESSIVE','UNLIKELY',
+                'NOT_EVALUATED']
+
+        for ht in hi_ts:
+            for col in hi_ts_cols:
+                hs_ts_cols.append(f"{ht}_{col}")
+
         feature_cols = [
-            'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','TEL_DIST', 
-            'HI_SCORE','TS_SCORE','%HI','pLI','LOEUF','GC_CONTENT', 
-            'POP_FREQ','CLINVAR_DENSITY'
-        ]
+            'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','%HI','pLI',
+            'LOEUF','GC_CONTENT','POP_FREQ','CLINVAR_DENSITY','PHYLOP_SCORE',
+            'PHASTCONS_SCORE'] + hs_ts_cols
+
         label = 'LABEL'
 
         # Divide training data by CNV type
         XY = input.copy()
 
         if self.norm:
+
+            log_null_value = 0.1
+
+            XY['BP_LEN'] = np.log(XY['BP_LEN'])
+            XY['GENE_COUNT'] = np.log(XY['GENE_COUNT'].replace(0,log_null_value))
+            XY['DISEASE_COUNT'] = np.log(XY['DISEASE_COUNT'].replace(0,log_null_value))
+            XY['CLINVAR_DENSITY'] = np.log(XY['CLINVAR_DENSITY'].replace(0,log_null_value))
+
             with open(os.path.join(self.root_path, 'models', 'scalers.pickle'), 'rb') as f:
                 col_scalers = pickle.load(f)
             for col in feature_cols:
                 XY[col] = col_scalers[col].transform(XY[col].values.reshape(-1,1))
+
 
         XY_dup = XY[XY['CHANGE'] == 'DUP']
         XY_del = XY[XY['CHANGE'] == 'DEL']
@@ -88,16 +98,27 @@ class Classifier():
         Y_dup = np.array(Y_dup.apply(get_map, map = map))
 
         # Define optimal hyperparameters
-        rf_del = {
-            'n_estimators': 150, 'min_samples_split': 5, 'min_samples_leaf': 3, 
-            'max_features': 'sqrt', 'max_depth': None, 'bootstrap': False
-            }
+        rf_del = {'n_estimators': 275,'min_weight_fraction_leaf': 0.0,
+            'min_samples_split': 2,'min_samples_leaf': 3,'max_samples': 1.0,
+            'max_features': 'sqrt','max_depth': None,'criterion': 'entropy',
+            'class_weight': None,'ccp_alpha': 0.0,'bootstrap': True}
 
-        xgb_dup = {
-            'tree_method': 'approx', 'reg_lambda': 1, 'reg_alpha': 0,
-            'n_estimators': 100, 'max_depth': 10, 'gamma': 0, 'eta': 0.1, 
-            'booster': 'gbtree', 'base_score': 0.5
-         }
+        rf_dup = {'n_estimators': 200,'min_weight_fraction_leaf': 0.0,
+            'min_samples_split': 10,'min_samples_leaf': 3,'max_samples': None,
+            'max_features': 'sqrt','max_depth': 20,'criterion': 'gini',
+            'class_weight': None,'ccp_alpha': 0.0,'bootstrap': False}
+        
+        # rf_dup = {'n_estimators': 275, 'min_weight_fraction_leaf': 0.0,
+        #     'min_samples_split': 2,'min_samples_leaf': 3,'max_samples': 1.0,
+        #     'max_features': 'sqrt','max_depth': None,'criterion': 'entropy',
+        #     'class_weight': None,'ccp_alpha': 0.0,'bootstrap': True}
+
+        
+        # xgb_dup = {
+        #     'tree_method': 'approx', 'reg_lambda': 1, 'reg_alpha': 0,
+        #     'n_estimators': 100, 'max_depth': 10, 'gamma': 0, 'eta': 0.1, 
+        #     'booster': 'gbtree', 'base_score': 0.5
+        #  }
         
         # Generate models
         bar.update(1)
@@ -106,20 +127,34 @@ class Classifier():
             **rf_del,
             random_state = self.random_seed
         ).fit(X_del, Y_del)
+
+        self.del_calibrated_model = CalibratedClassifierCV(self.del_model, method='isotonic')
+        self.del_calibrated_model.fit(X_del, Y_del)
+
         bar.update(2)
         bar_widgets[0] = progressbar.FormatLabel('Training duplication model')
 
-        self.dup_model = xgboost.XGBClassifier(
-            **xgb_dup,
+        self.dup_model = ensemble.RandomForestClassifier(
+            **rf_dup,
             random_state = self.random_seed
         ).fit(X_dup, Y_dup)
+
+        self.dup_calibrated_model = CalibratedClassifierCV(self.dup_model, method='isotonic')
+        self.dup_calibrated_model.fit(X_dup, Y_dup)
+
+        # self.dup_model = xgboost.XGBClassifier(
+        #     **xgb_dup,
+        #     random_state = self.random_seed
+        # ).fit(X_dup, Y_dup)
+
+
         bar.update(3)
         bar_widgets[0] = progressbar.FormatLabel('Model training complete')
 
-        self.pipe = Pipeline([('xgb', xgboost.XGBClassifier(
-            **xgb_dup,
-            random_state = self.random_seed
-        ))]).fit(X_dup, Y_dup)
+        # self.pipe = Pipeline([('xgb', xgboost.XGBClassifier(
+        #     **xgb_dup,
+        #     random_state = self.random_seed
+        # ))]).fit(X_dup, Y_dup)
 
 
         self.onnx = False
@@ -139,28 +174,34 @@ class Classifier():
             widgets=bar_widgets)
         bar.start()
 
-        # Limit to feature columns
-        # feature_cols = [
-        #     'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','TEL_DIST', 
-        #     'HI_SCORE','TS_SCORE','%HI','pLI','LOEUF','GC_CONTENT', 
-        #     'POP_FREQ','CLINVAR_DENSITY','P_TRIPLO','P_HAPLO','gnomad_oe_lof',
-        #     'gnomad_oe_lof_upper','gnomad_pLI','gnomad_lof_z','gnomad_mis_z',
-        #     'gnomad_oe_mis_upper','episcore','sHet','exon_phastcons','hurles_hi',
-        #     'rvis','promoter_cpg_count','eds','promoter_phastcons','cds_length',
-        #     'gnomad_pNull'
-        # ]
+        hs_ts_cols = []
+        hi_ts = ['HI','TS']
+        hi_ts_cols = ['NO_EVIDENCE','LITTLE_EVIDENCE','EMERGING_EVIDENCE',
+                'SUFFICIENT_EVIDENCE','AUTOSOMAL_RECESSIVE','UNLIKELY',
+                'NOT_EVALUATED']
+
+        for ht in hi_ts:
+            for col in hi_ts_cols:
+                hs_ts_cols.append(f"{ht}_{col}")
 
         feature_cols = [
-            'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','TEL_DIST', 
-            'HI_SCORE','TS_SCORE','%HI','pLI','LOEUF','GC_CONTENT', 
-            'POP_FREQ','CLINVAR_DENSITY'
-        ]
+            'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','%HI','pLI',
+            'LOEUF','GC_CONTENT','POP_FREQ','CLINVAR_DENSITY','PHYLOP_SCORE',
+            'PHASTCONS_SCORE'] + hs_ts_cols
 
 
         # Divide training data by CNV type
         XY = input.copy()
 
         if self.norm:
+            
+            log_null_value = 0.1
+
+            XY['BP_LEN'] = np.log(XY['BP_LEN'])
+            XY['GENE_COUNT'] = np.log(XY['GENE_COUNT'].replace(0,log_null_value))
+            XY['DISEASE_COUNT'] = np.log(XY['DISEASE_COUNT'].replace(0,log_null_value))
+            XY['CLINVAR_DENSITY'] = np.log(XY['CLINVAR_DENSITY'].replace(0,log_null_value))
+
             with open(os.path.join(self.root_path, 'models', 'scalers.pickle'), 'rb') as f:
                 col_scalers = pickle.load(f)
             for col in feature_cols:
@@ -181,28 +222,31 @@ class Classifier():
         bar.update(1)
 
         if self.onnx:
-            
-            sess = rt.InferenceSession(os.path.join(self.root_path, 'models', "del.onnx"))
-            input_name = sess.get_inputs()[0].name
-            del_pred = sess.run(None, {input_name: np.array(X_del, dtype = 'f')})
-            del_pred = pd.DataFrame(del_pred[1]).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
-            
-            bar_widgets[0] = progressbar.FormatLabel('Obtaining DUP predictions')
-            bar.update(2)
 
-            sess = rt.InferenceSession(os.path.join(self.root_path, 'models', "dup.onnx"))
-            input_name = sess.get_inputs()[0].name
-            dup_pred = sess.run(None, {input_name: np.array(X_dup, dtype = 'f')})
-            dup_pred = pd.DataFrame(dup_pred[1]).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
+            x = 1
+            
+            # sess = rt.InferenceSession(os.path.join(self.root_path, 'models', "del.onnx"))
+            # input_name = sess.get_inputs()[0].name
+            # del_pred = sess.run(None, {input_name: np.array(X_del, dtype = 'f')})
+            # del_pred = pd.DataFrame(del_pred[1]).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
+            
+            # bar_widgets[0] = progressbar.FormatLabel('Obtaining DUP predictions')
+            # bar.update(2)
+
+            # sess = rt.InferenceSession(os.path.join(self.root_path, 'models', "dup.onnx"))
+            # input_name = sess.get_inputs()[0].name
+            # dup_pred = sess.run(None, {input_name: np.array(X_dup, dtype = 'f')})
+            # dup_pred = pd.DataFrame(dup_pred[1]).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
 
         else:
-            del_pred = self.del_model.predict_proba(X_del)
+
+            del_pred = self.del_calibrated_model.predict_proba(X_del)
             del_pred = pd.DataFrame(del_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
 
             bar_widgets[0] = progressbar.FormatLabel('Obtaining DUP predictions')
             bar.update(2)
 
-            dup_pred = self.dup_model.predict_proba(X_dup)
+            dup_pred = self.dup_calibrated_model.predict_proba(X_dup)
             dup_pred = pd.DataFrame(dup_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
 
         bar_widgets[0] = progressbar.FormatLabel('Reformatting and saving predictions')

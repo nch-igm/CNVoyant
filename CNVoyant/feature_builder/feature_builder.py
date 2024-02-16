@@ -1,4 +1,5 @@
 import pandas as pd
+import sys
 import os
 import re
 import math
@@ -7,7 +8,7 @@ import subprocess
 import sys
 import progressbar
 import vcf
-from sklearn.preprocessing import MinMaxScaler
+# import pyranges as pr
 from ..liftover.liftover import get_liftover_positions
 
 
@@ -15,11 +16,29 @@ class FeatureBuilder:
 
     def __init__(self, variant_df: pd.DataFrame, data_dir: str, ref: str):
 
+        # Set conda env
+        self.conda_bin = os.path.join(sys.exec_prefix, 'bin')
+
+        # Set variants
+        self.variant_df = variant_df
+
         # Get root path
         self.data_dir = data_dir
         self.ref = ref
         self.centromere_df = pd.read_csv(os.path.join(self.data_dir, 'centromeres.csv'), index_col = 0)
         self.telomere_df = pd.read_csv(os.path.join(self.data_dir, 'telomeres.csv'),  index_col = 0)
+        self.gene_position_df = pd.read_csv(os.path.join(self.data_dir, 'gene_positions.csv')).rename(columns = {
+            'Chromosomes':'CHROMOSOME',
+            'GRCh38_start':'START',
+            'GRCh38_stop':'END'
+        })
+        self.gene_position = {chrom: self.gene_position_df[self.gene_position_df['CHROMOSOME'] == chrom] for chrom in self.gene_position_df['CHROMOSOME'].unique()}
+
+        # self.gene_position_ranges = pr.PyRanges(
+        #         chromosomes=self.gene_position_df['CHROMOSOME'],
+        #         starts=self.gene_position_df['START'],
+        #         ends=self.gene_position_df['END']
+        #     )
 
         # Replace nulls with -999 for genes with no gene associations
         self.mim2gene = pd.read_csv(os.path.join(self.data_dir, 'mim2gene_medgen'), sep = '\t')
@@ -27,16 +46,46 @@ class FeatureBuilder:
         self.mim2gene = self.mim2gene.astype({'GeneID': int})
         self.mim2gene.columns = ['OMIM ID'] + self.mim2gene.columns[1:].to_list()
 
-        self.gnomadSV = pd.read_csv(os.path.join(self.data_dir, 'gnomad_frequencies.csv'), dtype = {'chrom': str})
-        self.hi_ts_df = pd.read_csv(os.path.join(self.data_dir, 'hi_ts_regions.csv'))
-        self.hi_ts_mapped_df = pd.read_csv(os.path.join(self.data_dir, 'hi_ts_map.csv'))
-        self.variant_df = variant_df
+        self.gnomadSV_df = pd.read_csv(os.path.join(self.data_dir, 'gnomad4.csv.gz'), dtype = {'CHROM': str}).rename(columns = {'CHROM':'CHROMOSOME'})
+        self.gnomadSV_df['CHROMOSOME'] = self.gnomadSV_df['CHROMOSOME'].str[3:]
+        self.gnomadSV = {t: {chrom: self.gnomadSV_df[(self.gnomadSV_df['CHROMOSOME'] == chrom) & (self.gnomadSV_df['TYPE'] == t)] for chrom in self.gnomadSV_df['CHROMOSOME'].unique()} for t in ['DEL','DUP']}
+        # self.gnomadSV_ranges = {t: {chrom: pr.PyRanges(
+        #     chromosomes=self.gnomadSV[t][chrom]['CHROMOSOME'],
+        #     starts=self.gnomadSV[t][chrom]['START'],
+        #     ends=self.gnomadSV[t][chrom]['END']
+        # ) for chrom in self.gnomadSV[t].keys()} for t in ['DEL','DUP']}
+
+
+        self.hi_ts_df = pd.read_csv(os.path.join(self.data_dir, 'hi_ts_parsed.csv'))
+        self.hi_ts = {chrom: self.hi_ts_df[self.hi_ts_df['CHROMOSOME'] == chrom] for chrom in self.hi_ts_df['CHROMOSOME'].unique()}
+        # self.hi_ts_ranges = {chrom: pr.PyRanges(
+        #     chromosomes=self.hi_ts[chrom][self.hi_ts[chrom]['CHROMOSOME'] == chrom]['CHROMOSOME'],  # Assuming there's a 'CHROMOSOME' column
+        #     starts=self.hi_ts[chrom][self.hi_ts[chrom]['CHROMOSOME'] == chrom]['START'],
+        #     ends=self.hi_ts[chrom][self.hi_ts[chrom]['CHROMOSOME'] == chrom]['END']
+        # ) for chrom in self.hi_ts.keys()}
 
         # Create a breakpoint dataframe to determine chromosome arm length
         self.breakpoint_df = self.centromere_df.merge(self.telomere_df, on = 'CHROMOSOME', suffixes = ('_cen','_tel'))
         self.breakpoint_df['arm1_len'] = self.breakpoint_df['start_cen'] -  self.breakpoint_df['start_tel']
         self.breakpoint_df['arm2_len'] = self.breakpoint_df['end_tel'] - self.breakpoint_df['end_cen']
 
+        # Conservation data
+        self.phylop_df = pd.read_csv('/igm/home/rsrxs003/rnb/output/BL-384/cons_score.csv', index_col=0)
+        self.phastcons_df = pd.read_csv('/igm/home/rsrxs003/rnb/output/BL-384/phastcons_score.csv', index_col=0)
+
+        # Null HI/TS res
+        hi_ts_cols = ['NO_EVIDENCE','LITTLE_EVIDENCE','EMERGING_EVIDENCE',
+                'SUFFICIENT_EVIDENCE','AUTOSOMAL_RECESSIVE','UNLIKELY',
+                'NOT_EVALUATED']
+
+        self.null_hi_ts = { **{
+            '%HI': self.hi_ts_df['%HI'].max(),
+            'pLI': self.hi_ts_df['pLI'].min(),
+            'LOEUF': self.hi_ts_df['LOEUF'].max()
+            },
+            **{f"HI_{c}":0 for c in hi_ts_cols},
+            **{f"TS_{c}":0 for c in hi_ts_cols}
+        }
 
     def get_features(self):#, clinvar_ids: list): 
         """
@@ -59,36 +108,37 @@ class FeatureBuilder:
         def get_bp_length(row):
             return row['END'] - row['START'] + 1
         
-        def get_all_genes(row, gene_position_df):
+        def get_all_genes(row):
             """
             Query the gene position table to find the intersecting genes
-            """
+            """        
 
-            intersect_df = gene_position_df[
-                (row['CHROMOSOME'] == gene_position_df['Chromosomes'])
-                    &
-                (
-                    (
-                        (row['START'] <= gene_position_df['GRCh38_start'])
-                            &
-                        (row['END'] >= gene_position_df['GRCh38_start'])
-                    )
-                        |
-                    (
-                        (row['START'] <= gene_position_df['GRCh38_stop'])
-                            &
-                        (row['END'] >= gene_position_df['GRCh38_stop'])
-                    )
-                        |
-                    (
-                        (row['START'] >= gene_position_df['GRCh38_start'])
-                            &
-                        (row['END'] <= gene_position_df['GRCh38_stop'])
-                    )
-                )
-            ]
+            gene_position = self.gene_position[row['CHROMOSOME']]
+            df = gene_position.loc[
+                        (gene_position['START'].between(row['START'], row['END']))
+                            |
+                        (gene_position['START'].between(row['START'], row['END']))
+                ]    
+
+            # row_interval = pr.PyRanges(
+            #     chromosomes=[row['CHROMOSOME']],
+            #     starts=[row['START']],
+            #     ends=[row['END']]
+            # )
+
+            # intersect_df = self.gene_position.intersect(row_interval).df.rename(columns = {
+            #     'Chromosome':'CHROMOSOME',
+            #     'Start':'START',
+            #     'End':'END'
+            # })
+
+            if df.empty:
+                return []
+
+            # intersect_df = intersect_df.merge(self.gene_position_df, on = ['CHROMOSOME','START','END'])
+
                 
-            return intersect_df['GeneID'].to_list()
+            return df['GeneID'].to_list()
 
 
         def get_omim_disease_genes(row):
@@ -138,7 +188,7 @@ class FeatureBuilder:
 
 
         def get_gc_content(row):
-            command = f"samtools faidx {self.ref} chr{row['CHROMOSOME']}:{row['START']}-{row['END']}"
+            command = f"{os.path.join(self.conda_bin,'samtools')} faidx {self.ref} chr{row['CHROMOSOME']}:{row['START']}-{row['END']}"
             p = subprocess.Popen(command,  stdout=subprocess.PIPE, shell = True)
             out, err = p.communicate()
             s = "".join(out.decode().strip().split()[1:])
@@ -149,6 +199,7 @@ class FeatureBuilder:
             except:
                 print(s)
 
+
         def get_hi_ts_regions(row):
             """
             Haploinsucciency(HS) and triplosensitive(TS) regions have been 
@@ -157,79 +208,69 @@ class FeatureBuilder:
             intersects with any HS or TS regions, and to what extent.
             """
 
-            def get_region_coverage(row, cnv_start, cnv_end):
-                left = max(cnv_start, row['START'])
-                right = min(cnv_end, row['END'])
-                num = left - right
-                denom = row['START'] - row['END']
-                return num / denom
+            # def get_region_coverage(row, cnv_start, cnv_end):
+            #     left = max(cnv_start, row['START'])
+            #     right = min(cnv_end, row['END'])
+            #     num = left - right
+            #     denom = row['START'] - row['END']
+            #     return num / denom
 
-            def get_hi_ts_scores(row):
-                data = {}
-                data['HI_SCORE'] = self.hi_ts_mapped_df.loc[self.hi_ts_mapped_df['HI_TS_Score'] == row['HI Score']].reset_index().loc[0, 'Mapped_Score']
-                data['TS_SCORE'] = self.hi_ts_mapped_df.loc[self.hi_ts_mapped_df['HI_TS_Score'] == row['TS Score']].reset_index().loc[0, 'Mapped_Score']
-                return data
+            hi_ts_df = self.hi_ts[row['CHROMOSOME']]
 
             # Filter to only include regions intersecting with CNV
-            df = self.hi_ts_df.loc[
-                (self.hi_ts_df['CHROMOSOME'] == row['CHROMOSOME']) 
-                        & 
-                    (
-                        (self.hi_ts_df['START'].between(row['START'], row['END']))
+            # df = self.hi_ts_df.loc[
+            #     (self.hi_ts_df['CHROMOSOME'] == row['CHROMOSOME']) 
+            #             & 
+            #         (
+            #             (self.hi_ts_df['START'].between(row['START'], row['END']))
+            #                 |
+            #             (self.hi_ts_df['START'].between(row['START'], row['END']))
+            #         )
+            #     ]
+
+            # row_range = pr.PyRanges(
+            #     chromosomes=[row['CHROMOSOME']],
+            #     starts=[row['START']],
+            #     ends=[row['END']]
+            # )
+
+            # intersect_df = hi_ts_ranges.intersect(row_range).df.rename(columns = {
+            #     'Chromosome':'CHROMOSOME',
+            #     'Start':'START',
+            #     'End':'END'
+            # })
+
+            df = hi_ts_df.loc[
+                        (hi_ts_df['START'].between(row['START'], row['END']))
                             |
-                        (self.hi_ts_df['START'].between(row['START'], row['END']))
-                    )
+                        (hi_ts_df['START'].between(row['START'], row['END']))
                 ]
 
-            # Only keep the gene entries
-            # print(row['clinvar_id'], row['gene_count'], f'chr{row["chrom"]}', row['GRCh38_start'], row['GRCh38_end'], len(df.index), len(df[df['type'] != 'R'].index), len(df[(df['%HI'] != '‐') | (df['pLI'] != '‐') | (df['LOEUF'] != '‐')].index), row['gene_info'])
-            df = df[(df['%HI'] != '‐') & (df['pLI'] != '‐') & (df['LOEUF'] != '‐')]
 
             # Exit if the dataframe is empty
+            hi_ts = ['HI','TS']
+            hi_ts_cols = ['NO_EVIDENCE','LITTLE_EVIDENCE','EMERGING_EVIDENCE',
+                'SUFFICIENT_EVIDENCE','AUTOSOMAL_RECESSIVE','UNLIKELY',
+                'NOT_EVALUATED']
+
+
             if df.empty:
-                return {
-                    'HI_SCORE': 0,
-                    'TS_SCORE': 0,
-                    '%HI': 100,
-                    'pLI': 0,
-                    'LOEUF': 2 # max value in HI table
-                    }
+                return self.null_hi_ts
 
-            # Get coverage percentage for each intersecting region
-            df['percent_coverage'] = df.apply(
-                get_region_coverage, 
-                cnv_start = row['START'], 
-                cnv_end = row['END'],
-                axis = 1)
-
-            # Map HI and TS scores from pre-defined values
-            df['data'] = df.apply(get_hi_ts_scores, axis = 1)
-            df = pd.concat([df.drop(['HI Score', 'TS Score', 'data'], axis = 1), df['data'].apply(pd.Series)], axis = 1)
-
-            # Calculate final overlap * (TS/HS)
-            df['adjusted_HI_score'] = df['percent_coverage'] * df['HI_SCORE']
-            df['adjusted_TS_score'] = df['percent_coverage'] * df['TS_SCORE']
-
-            # Fill null values in float columns
-            for col in ['%HI', 'pLI', 'LOEUF']:
-                try:
-                    df[col] = df[col].astype(float)
-                except Exception as e:
-                    print(type(e), e)
-                    print(df)
-
-            df['adjusted_%HI'] = df['percent_coverage'] * df['%HI']
-            df['adjusted_pLI'] = df['percent_coverage'] * df['pLI']
-            df['adjusted_LOEUF'] = df['percent_coverage'] * df['LOEUF']
+            # df = df.merge(hi_ts_df, on = ['CHROMOSOME','START','END'])
 
             # Return the score of the worst intersecting HI/TS region
-            return {
-                'HI_SCORE': df['adjusted_HI_score'].max(),
-                'TS_SCORE': df['adjusted_TS_score'].max(),
-                '%HI': df['adjusted_%HI'].min(),
-                'pLI': df['adjusted_pLI'].max(),
-                'LOEUF': df['adjusted_LOEUF'].min()
+            res = {
+                '%HI': df['%HI'].min(),
+                'pLI': df['pLI'].max(),
+                'LOEUF': df['LOEUF'].min()
                 }
+
+            for ht in hi_ts:
+                for col in hi_ts_cols:
+                    res.update({f'{ht}_{col}': df[f'{ht}_{col}'].sum()})
+
+            return res
 
 
         def get_population_frequency(row):
@@ -239,33 +280,55 @@ class FeatureBuilder:
             in intersecting variants
             """
 
-            def get_region_coverage(row, cnv_start, cnv_end):
-                left = max(cnv_start, row['start'])
-                right = min(cnv_end, row['stop'])
-                num = left - right
-                denom = row['start'] - row['stop']
-                return num / denom
+            # def get_region_coverage(row, cnv_start, cnv_end):
+            #     left = max(cnv_start, row['START'])
+            #     right = min(cnv_end, row['stop'])
+            #     num = left - right
+            #     denom = row['start'] - row['stop']
+            #     return num / denom
 
-            gnomad_df = self.gnomadSV.loc[
-                    (self.gnomadSV['start'].between(row['START'], row['END'])) 
-                        | 
-                    (self.gnomadSV['stop'].between(row['START'], row['END']))
-                ]
+            # gnomad_ranges = self.gnomadSV_ranges[row['CHANGE']][row['CHROMOSOME']]
+            gnomad_df = self.gnomadSV[row['CHANGE']][row['CHROMOSOME']]
 
-            if not gnomad_df.empty:
-                gnomad_df['percent_coverage'] = gnomad_df.apply(
-                    get_region_coverage, 
-                    cnv_start = row['START'], 
-                    cnv_end = row['END'],
-                    axis = 1)
+            df = gnomad_df.loc[
+                (gnomad_df['START'].between(row['START'], row['END']))
+                    |
+                (gnomad_df['START'].between(row['START'], row['END']))
+            ]
 
-            else:
-                gnomad_df['percent_coverage'] = 0
+            # gnomad_ranges = pr.PyRanges(
+            #     chromosomes=gnomad_df['CHROMOSOME'],  # Assuming there's a 'CHROMOSOME' column
+            #     starts=gnomad_df['START'],
+            #     ends=gnomad_df['END']
+            # )
+
+            # row_range = pr.PyRanges(
+            #     chromosomes=[row['CHROMOSOME']],
+            #     starts=[row['START']],
+            #     ends=[row['END']]
+            # )
+
+            # intersect_df = gnomad_ranges.intersect(row_range).df.rename(columns = {
+            #     'Chromosome':'CHROMOSOME',
+            #     'Start':'START',
+            #     'End':'END'
+            # })
+
+            if df.empty:
+                return 0
+
+            # gnomad_df = intersect_df.merge(self.gnomadSV[row['CHANGE']][row['CHROMOSOME']], on = ['CHROMOSOME','START','END'])
+            
+            df['percent_coverage'] = (
+            df[['START', 'END']].clip(lower=row['START'], upper=row['END']).diff(axis=1) / 
+                        df[['START', 'END']].diff(axis=1)
+                        )['END']
 
             # Only consider variants that cover at least half of the CNV
-            gnomad_df = gnomad_df.loc[gnomad_df['percent_coverage'] >= 0.5]
+            df = df.loc[df['percent_coverage'] >= 0.5]
 
-            return gnomad_df['pop_freq'].mean()
+            # return gnomad_df['pop_freq'].mean()
+            return df['POP_FREQ'].max()
 
         
         def get_clinvar_path_density(row, clinvar_reader):
@@ -278,6 +341,13 @@ class FeatureBuilder:
                 except:
                     pass
             return path_count
+
+
+        def get_phastcons(row):
+            return self.phastcons_df.loc[row['KEY'],'PHASTCONS_SCORE']
+
+        def get_phylop(row):
+            return self.phylop_df.loc[row['KEY'],'CONS_SCORE']
 
         def get_ptriplo(row, c_data):
             try:
@@ -314,24 +384,19 @@ class FeatureBuilder:
 
         cnv_df = self.variant_df.copy()
 
-        # Load dependencies
-        gene_position_df = pd.read_csv(os.path.join(self.data_dir, 'gene_positions.csv'))
-
         # Intialize progress bar
         bar_widgets = [progressbar.FormatLabel('Building Features'), ' ', progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage(), ' ', progressbar.Timer()]
-        bar = progressbar.ProgressBar(maxval=14, \
+        bar = progressbar.ProgressBar(maxval=12, \
             widgets=bar_widgets)
         bar.start()
         bar_widgets[0] = progressbar.FormatLabel('Ensuring positions are in hg38')
 
         # Map to hg38
-        # cnv_df['build'] = config['build']
         cnv_df['build'] = 'GRCh38'
         cnv_df['variant'] = cnv_df.apply(get_liftover_positions, axis = 1)
         cnv_df = pd.concat([cnv_df.drop(['variant','START','END'], axis = 1), cnv_df['variant'].apply(pd.Series)], axis = 1)
         cnv_df = cnv_df.astype({'START': 'int32', 'END': 'int32'})
         original_cols = list(cnv_df.columns)
-        # cnv_df = cnv_df[['CHROMOSOME','START','END','CHANGE']]
 
         # Get features
         bar.update(1)
@@ -340,7 +405,7 @@ class FeatureBuilder:
 
         bar.update(2)
         bar_widgets[0] = progressbar.FormatLabel('Collecting gene data')
-        cnv_df['gene_info'] = cnv_df.apply(get_all_genes, gene_position_df = gene_position_df, axis = 1)
+        cnv_df['gene_info'] = cnv_df.apply(get_all_genes, axis = 1)
 
         bar.update(3)
         bar_widgets[0] = progressbar.FormatLabel('Calculating gene count')
@@ -355,23 +420,19 @@ class FeatureBuilder:
         cnv_df['CENT_DIST'] = cnv_df.apply(get_centromere_distance, axis = 1)
 
         bar.update(6)
-        bar_widgets[0] = progressbar.FormatLabel('Calculating telomere distance count')
-        cnv_df['TEL_DIST'] = cnv_df.apply(get_telomere_distance, axis = 1)
-
-        bar.update(7)
         bar_widgets[0] = progressbar.FormatLabel('Calculating HI/TS coverage')
         cnv_df['hi_ts_region_scores'] = cnv_df.apply(get_hi_ts_regions, axis = 1)
         cnv_df = pd.concat([cnv_df.drop('hi_ts_region_scores', axis = 1), cnv_df['hi_ts_region_scores'].apply(pd.Series) ], axis = 1)
 
-        bar.update(8)
+        bar.update(7)
         bar_widgets[0] = progressbar.FormatLabel('Calculating GC content')
         cnv_df['GC_CONTENT'] = cnv_df.apply(get_gc_content, axis = 1)
 
-        bar.update(9)
+        bar.update(8)
         bar_widgets[0] = progressbar.FormatLabel('Collecting population frequencies')
-        cnv_df['POP_FREQ'] = cnv_df.apply(get_population_frequency, axis = 1).fillna(0)
+        cnv_df['POP_FREQ'] = cnv_df.apply(get_population_frequency, axis = 1)
 
-        bar.update(10)
+        bar.update(9)
         bar_widgets[0] = progressbar.FormatLabel('Collecting ClinVar short variant density')
 
         # Create reader of ClinVar short variants
@@ -379,84 +440,54 @@ class FeatureBuilder:
         clinvar_reader = vcf.Reader(filename = clinvar_path, compressed=True, encoding='ISO-8859-1')
         cnv_df['CLINVAR_DENSITY'] = cnv_df.apply(get_clinvar_path_density, clinvar_reader = clinvar_reader, axis = 1)
         
-        # bar.update(11)
-        # bar_widgets[0] = progressbar.FormatLabel('ClinVar density generated')
-
-        # # Get maximum haploinsuffeciency and triplosensitivity probabilities 
-        # collins_path = os.path.join(self.data_dir, 'TS_score_geneid.csv')
-        # collins_df = pd.read_csv(collins_path)
-        # cnv_df['P_TRIPLO'] = cnv_df.apply(get_ptriplo, c_data = collins_df, axis = 1)
-        # cnv_df['P_HAPLO'] = cnv_df.apply(get_htriplo, c_data = collins_df, axis = 1)
-
-        # bar.update(12)
-        # bar_widgets[0] = progressbar.FormatLabel('Probability HI/TS generated')
-
-        # # Get other collins features
-        # collins_full_path = os.path.join(self.data_dir, 'collins_raw_geneid.csv')
-        # collins_full_df = pd.read_csv(collins_full_path)
-        # cnv_df['gnomad_oe_lof'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'gnomad_oe_lof', func_ = 'min', axis = 1)
-        # cnv_df['gnomad_oe_lof_upper'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'gnomad_oe_lof_upper', func_ = 'min', axis = 1)
-        # cnv_df['gnomad_pLI'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'gnomad_pLI', func_ = 'max', axis = 1)
-        # cnv_df['gnomad_lof_z'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'gnomad_lof_z', func_ = 'max', axis = 1)
-        # cnv_df['gnomad_mis_z'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'gnomad_mis_z', func_ = 'max', axis = 1)
-        # cnv_df['gnomad_oe_mis_upper'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'gnomad_oe_mis_upper', func_ = 'min', axis = 1)
-        # cnv_df['episcore'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'episcore', func_ = 'max', axis = 1)
-        # cnv_df['sHet'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'sHet', func_ = 'max', axis = 1)
-        # cnv_df['exon_phastcons'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'exon_phastcons', func_ = 'max', axis = 1)
-        # cnv_df['hurles_hi'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'hurles_hi', func_ = 'max', axis = 1)
-        # cnv_df['rvis'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'rvis', func_ = 'max', axis = 1)
-        # cnv_df['promoter_cpg_count'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'promoter_cpg_count', func_ = 'max', axis = 1)
-        # cnv_df['eds'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'eds', func_ = 'max', axis = 1)
-        # cnv_df['promoter_phastcons'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'promoter_phastcons', func_ = 'max', axis = 1)
-        # cnv_df['cds_length'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'cds_length', func_ = 'max', axis = 1)
-        # cnv_df['gnomad_pNull'] = cnv_df.apply(get_collins_data, c_data_full = collins_full_df, col = 'gnomad_pNull', func_ = 'min', axis = 1)
-        
-
+        bar.update(10)
+        bar_widgets[0] = progressbar.FormatLabel('ClinVar density generated')
+        cnv_df['PHYLOP_SCORE'] = cnv_df.apply(get_phylop, axis = 1)
+        cnv_df['PHASTCONS_SCORE'] = cnv_df.apply(get_phastcons, axis = 1)
 
         bar.update(11)
-        # bar.update(13)
         bar_widgets[0] = progressbar.FormatLabel('All features generated, normalizing')
-
 
         # Fill NAs
         cnv_df = cnv_df.fillna({
-            'GC_CONTENT': .5,
+            'GC_CONTENT': cnv_df['GC_CONTENT'].median(),
             'CLINVAR_DENSITY': 0,
-            'POP_FREQ': 0
+            'POP_FREQ': 0,
+            'PHYLOP_SCORE': cnv_df['PHYLOP_SCORE'].min(),
+            'PHASTCONS_SCORE': cnv_df['PHASTCONS_SCORE'].min()
         })
 
 
-        # Normalize features
-        cnv_norm_df = cnv_df.copy()
-        scaler = MinMaxScaler()
-
         cols_to_normalize = [
-            'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','TEL_DIST', 
+            'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST', 
             'HI_SCORE','TS_SCORE','%HI','pLI','LOEUF','GC_CONTENT', 
-            'POP_FREQ','CLINVAR_DENSITY'
+            'POP_FREQ','CLINVAR_DENSITY','PHYLOP_SCORE','PHASTCONS_SCORE'
         ]
-        # cols_to_normalize = [
-        #     'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','TEL_DIST', 
-        #     'HI_SCORE','TS_SCORE','%HI','pLI','LOEUF','GC_CONTENT', 
-        #     'POP_FREQ','CLINVAR_DENSITY','P_TRIPLO','P_HAPLO','gnomad_oe_lof',
-        #     'gnomad_oe_lof_upper','gnomad_pLI','gnomad_lof_z','gnomad_mis_z',
-        #     'gnomad_oe_mis_upper','episcore','sHet','exon_phastcons','hurles_hi',
-        #     'rvis','promoter_cpg_count','eds','promoter_phastcons','cds_length',
-        #     'gnomad_pNull'
-        # ]
 
-        # for col in cols_to_normalize:
-        #     cnv_norm_df[col] = scaler.fit_transform(cnv_norm_df[col].values.reshape(-1,1))
+        hs_ts_cols = []
+        hi_ts = ['HI','TS']
+        hi_ts_cols = ['NO_EVIDENCE','LITTLE_EVIDENCE','EMERGING_EVIDENCE',
+                'SUFFICIENT_EVIDENCE','AUTOSOMAL_RECESSIVE','UNLIKELY',
+                'NOT_EVALUATED']
+
+        for ht in hi_ts:
+            for col in hi_ts_cols:
+                hs_ts_cols.append(f"{ht}_{col}")
+                cnv_df = cnv_df.astype({f"{ht}_{col}":int})
+
+        feature_cols = cols_to_normalize + hs_ts_cols
+        
+        for col in feature_cols:
+            cnv_df.loc[:,col] = cnv_df[col].astype(float)             
+
 
         bar_widgets[0] = progressbar.FormatLabel('Feature generation complete')
         bar.update(12)
-        # bar.update(14)
         bar.finish()
 
         cols = ['CHROMOSOME','START','END','CHANGE'] 
-        cols = cols + [oc for oc in original_cols if oc not in cols] + ['gene_info'] + cols_to_normalize
-        cols = [c for c in cols if c != 'build']
+        cols = cols + [oc for oc in original_cols if oc not in cols] + ['gene_info'] + cols_to_normalize + hs_ts_cols
+        cols = [c for c in cols if c not in ['build','HI_SCORE','TS_SCORE']]
 
-        # self.norm_feature_df, self.feature_df = cnv_norm_df[cols], cnv_df[cols]
         self.feature_df = cnv_df[cols]
         

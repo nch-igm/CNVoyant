@@ -30,45 +30,45 @@ class DependencyBuilder:
         return out.decode() if out else err.decode()
 
 
-    def get_gnomad_frequencies(self, vcf_path, output_path):
+    # def get_gnomad_frequencies(self, vcf_path, output_path):
 
-        vcf_reader = vcf.Reader(filename = vcf_path, compressed=True, encoding='ISO-8859-1')
+    #     vcf_reader = vcf.Reader(filename = vcf_path, compressed=True, encoding='ISO-8859-1')
 
-        rows = []
+    #     rows = []
 
-        for record in vcf_reader:
-            # print(record.INFO['SVTYPE'], record.FILTER)
-            if record.INFO['SVTYPE'] in ('DEL','DUP') and record.FILTER == []:
-                chrom = record.CHROM
-                pos1 = record.POS
-                pos2 = record.INFO['END']
-                var_type = 'DUP' if record.INFO['SVTYPE'] == 'DUP' else 'DEL'
-                freq = record.INFO['AC'][0] / record.INFO['AN']
-                rows.append([chrom, pos1, pos2, var_type, freq])
+    #     for record in vcf_reader:
+    #         # print(record.INFO['SVTYPE'], record.FILTER)
+    #         if record.INFO['SVTYPE'] in ('DEL','DUP') and record.FILTER == []:
+    #             chrom = record.CHROM
+    #             pos1 = record.POS
+    #             pos2 = record.INFO['END']
+    #             var_type = 'DUP' if record.INFO['SVTYPE'] == 'DUP' else 'DEL'
+    #             freq = record.INFO['AC'][0] / record.INFO['AN']
+    #             rows.append([chrom, pos1, pos2, var_type, freq])
 
-        df = pd.DataFrame(rows)
-        df.columns = ['chrom','start','stop','type','pop_freq']
-        df.to_csv(output_path, index = False)
+    #     df = pd.DataFrame(rows)
+    #     df.columns = ['chrom','start','stop','type','pop_freq']
+    #     df.to_csv(output_path, index = False)
 
         
     
-    def build_gnomad_db(self):
-        """
-        gnomadSV data is needed in order to generate population frequencies for 
-        the indicated CNVs. It is quite large when unzipped (~2GB). Be sure to 
-        account for this before running.
-        """
-        gnomad_path = os.path.join(self.data_dir, f'gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz')
-        gnomad_df_path = os.path.join(self.data_dir, 'gnomad_frequencies.csv')
-        if not os.path.exists(gnomad_df_path):
-            url = f"https://storage.googleapis.com/gcp-public-data--gnomad/papers/2019-sv/gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz"
-            cmd = f"""
-                curl -s "{url}" -o {gnomad_path}
-            """
-            p = self.worker(cmd)
+    # def build_gnomad_db(self):
+    #     """
+    #     gnomadSV data is needed in order to generate population frequencies for 
+    #     the indicated CNVs. It is quite large when unzipped (~2GB). Be sure to 
+    #     account for this before running.
+    #     """
+    #     gnomad_path = os.path.join(self.data_dir, f'gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz')
+    #     gnomad_df_path = os.path.join(self.data_dir, 'gnomad_frequencies.csv')
+    #     if not os.path.exists(gnomad_df_path):
+    #         url = f"https://storage.googleapis.com/gcp-public-data--gnomad/papers/2019-sv/gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz"
+    #         cmd = f"""
+    #             curl -s "{url}" -o {gnomad_path}
+    #         """
+    #         p = self.worker(cmd)
 
-            # Parse gnomAD
-            self.get_gnomad_frequencies(gnomad_path, gnomad_df_path)
+    #         # Parse gnomAD
+    #         self.get_gnomad_frequencies(gnomad_path, gnomad_df_path)
 
 
     def build_breakpoints(self):
@@ -119,12 +119,13 @@ class DependencyBuilder:
 
     def build_hi_ts_data(self):
         """
-        Data downloaded from url.com. This data comes packaged with CNVpred,
-        this function parses this data for use in feature generation.
+        Data downloaded from https://search.clinicalgenome.org/kb/gene-dosage. 
+        This data comes packaged with CNVoyant, this function parses this data 
+        for use in feature generation.
         """
 
         hi_ts_df_path = os.path.join(self.data_dir, 'hi_ti_gene.csv')
-        hi_ts_parsed_path = os.path.join(self.data_dir, 'hi_ts_regions.csv')
+        hi_ts_parsed_path = os.path.join(self.data_dir, 'hi_ts_parsed.csv')
         if not os.path.exists(hi_ts_parsed_path):
 
             def parse_coordinates(row):
@@ -139,24 +140,48 @@ class DependencyBuilder:
             hi_ts_df['build'] = 'GRCh38'
             hi_ts_df['pos_data'] = hi_ts_df.apply(parse_coordinates, axis = 1)
             hi_ts_df = pd.concat([hi_ts_df['pos_data'].apply(pd.Series), hi_ts_df.drop(['pos_data','GRCh38'], axis = 1)], axis = 1)
-            # hi_ts_df = hi_ts_df.dropna(subset = ['pLI'])
             hi_ts_df = hi_ts_df.loc[~hi_ts_df['CHROMOSOME'].isin(['', 'na'])]
             hi_ts_df = hi_ts_df.astype({'START': int, 'END': int})
             
             hi_ts_df['pos_data'] = hi_ts_df.apply(get_liftover_positions, axis = 1)
             hi_ts_df = pd.concat([hi_ts_df.drop(['pos_data','START','END'], axis = 1), hi_ts_df['pos_data'].apply(pd.Series)], axis = 1)
+            
+            # Update TS/HI score when unknown
+            cols = ['HI Score','TS Score']
+            for c in cols:
+                # hi_ts_df[c] = hi_ts_df[c].replace('Not Yet Evaluated','0 (No Evidence)')
+                hi_ts_df[c.upper().replace(' ','_')] = hi_ts_df[c]
+            hi_ts_df = hi_ts_df.drop(columns = cols)
+
+            # Only keep genes
+            hi_ts_df.loc[hi_ts_df['%HI'] == '‐', '%HI'] = pd.to_numeric(hi_ts_df['%HI'], errors = 'coerce').max()
+            hi_ts_df.loc[hi_ts_df['pLI'] == '‐', 'pLI'] = pd.to_numeric(hi_ts_df['pLI'], errors = 'coerce').max()
+            hi_ts_df.loc[hi_ts_df['LOEUF'] == '‐', 'LOEUF'] = pd.to_numeric(hi_ts_df['LOEUF'], errors = 'coerce').min()
+
+            # Break up
+            hi_ts = ['HI','TS']
+            hi_ts_map = {
+                'Not Yet Evaluated':'NOT_EVALUATED',
+                '0 (No Evidence)':'NO_EVIDENCE',
+                '1 (Little Evidence)':'LITTLE_EVIDENCE',
+                '2 (Emerging Evidence)':'EMERGING_EVIDENCE',
+                '3 (Sufficient Evidence)':'SUFFICIENT_EVIDENCE',
+                '30 (Autosomal Recessive)':'AUTOSOMAL_RECESSIVE',
+                '40 (Dosage Sensitivity Unlikely)':'UNLIKELY'
+            }
+
+            null_cols = {}
+            for ht in hi_ts:
+                hi_ts_df[f'{ht}_SCORE'] = hi_ts_df[f'{ht}_SCORE'].replace(hi_ts_map)
+                for v in hi_ts_map.values():
+                    hi_ts_df.loc[hi_ts_df[f'{ht}_SCORE'] == v, f'{ht}_{v}'] = 1
+                    null_cols[f'{ht}_{v}'] = 0
+
+            hi_ts_df = hi_ts_df.fillna(value=null_cols)
             hi_ts_df.to_csv(hi_ts_parsed_path, index = False)
 
         # Build scoring map
-        hi_ts_map_path = os.path.join(self.data_dir, 'hi_ts_map.csv')
-        if not os.path.exists(hi_ts_map_path):
-            unique_scores = [x for x in set(hi_ts_df['HI Score'].unique()).union(set(hi_ts_df['TS Score'].unique())) if not pd.isna(x)]
-            unique_scores.sort()
-            hi_ts_mapped_df = pd.DataFrame({
-                'HI_TS_Score': unique_scores,
-                'Mapped_Score': [0, 0.25, 0.5, 1, 0, 0, 0]
-            })
-            hi_ts_mapped_df.to_csv(hi_ts_map_path, index = False)
+        #     hi_ts_mapped_df.to_csv(hi_ts_map_path, index = False)
 
 
     def build_clinvar_db(self):
@@ -200,13 +225,13 @@ class DependencyBuilder:
         """
 
         # Intialize progress bar
-        bar_widgets = [progressbar.FormatLabel('Downloading and parsing gnomAD'), ' ', progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage(), ' ', progressbar.Timer()]
+        bar_widgets = [progressbar.FormatLabel('Intializing'), ' ', progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage(), ' ', progressbar.Timer()]
         bar = progressbar.ProgressBar(maxval=5, \
             widgets=bar_widgets)
         bar.start()
 
         # Download and unpack gnomAD data
-        self.build_gnomad_db()
+        # self.build_gnomad_db()
         bar.update(1)
         bar_widgets[0] = progressbar.FormatLabel('Downloading chromosomal breakpoints')
         
