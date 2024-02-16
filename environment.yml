@@ -1,0 +1,17 @@
+name: CNVoyant
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10.8
+  - pyvcf3
+  - matplotlib
+  - seaborn
+  - bcftools
+  - tabix
+  - samtools
+  - pysam
+  - htslib
+  - pip:
+    - CNVoyant
