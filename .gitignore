@@ -3,6 +3,7 @@ CNVoyant.egg-info
 build
 CNVoyant/data/*
 CNVoyant/liftover/temp
-!CNVoyant/data/hi_ti_gene.csv
+!CNVoyant/data/hi_ts_regions.csv
 !CNVoyant/data/gene_positions.csv
+!CNVoyant/data/gnomad4.csv.gz
 *.cpython*

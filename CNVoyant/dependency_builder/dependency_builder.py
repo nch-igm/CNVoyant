@@ -17,11 +17,14 @@ from ..liftover.liftover import get_liftover_positions
 
 class DependencyBuilder:
 
-    def __init__(self, data_dir: str = os.path.join(os.path.dirname(__file__), '..', 'data'), gnomadSV_version: str = '2.1'):
+    # def __init__(self, data_dir: str = os.path.join(os.path.dirname(__file__), '..', 'data'), gnomadSV_version: str = '2.1'):
+    def __init__(self, data_dir: str, gnomadSV_version: str = '2.1'):
+
+        self.conda_bin = os.path.join(sys.exec_prefix, 'bin')
         self.data_dir = data_dir
+        self.package_data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
         self.gnomadSV_version = gnomadSV_version
-        self.repo_url = 'https://github.com/yourusername/yourrepository.git'
-        self.target_dir = './path/to/save/lfs/files'
+        self.repo_url = 'https://github.com/nch-igm/CNVoyant'
 
 
     def worker(self, cmd):
@@ -32,29 +35,36 @@ class DependencyBuilder:
         return out.decode() if out else err.decode()
 
 
-    def _is_git_lfs_installed(self):
-        try:
-            subprocess.run(['git', 'lfs', 'version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return True
-        except subprocess.CalledProcessError:
-            return False
+    def download_file(self, url, output, binary=False):
+        """
+        Download a file from `url` and save it locally under `output`.
+        The file is downloaded in chunks to save on memory usage.
+        """
+        r = requests.get(url)
+        if r.status_code == 200:
+            if binary:
+                with open(output, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            else:
+                with open(output, 'w') as f:
+                    f.write(r.text)
+            print(f"File downloaded successfully: {output}")
+        else:
+            print(f'Bad url: {url}')
 
 
-    def get_lfs_files(self):
+    def download_lfs_files(self):
+        """
+        Download a necessary file from the CNVoyant Git LFS-enabled repository.
+        """
+        for variant_type in ['del','dup']:
+            
+            file_path = os.path.join('CNVoyant','classifier','models',f'{variant_type}_model.pickle')
+            output = os.path.join(self.data_dir, os.path.basename(file_path))
+            url = f"{os.path.join(self.repo_url,'blob','main',file_path)}?raw=true"
+            self.download_file(url, output)
 
-        # Check if Git LFS is installed
-        if not self._is_git_lfs_installed():
-            print("Git LFS is not installed. Please install Git LFS first.")
-            return False
-        
-        # Clone LFS files or pull from the repository
-        if not os.path.exists(self.target_dir):
-            os.makedirs(self.target_dir)
-        p = worker(f"git lfs clone {self.repo_url} {self.target_dir}")
-        
-        # Additional steps could include verifying the integrity of the files
-        print("LFS files downloaded successfully.")
-        return True
 
 
     def get_gnomad_frequencies(self, vcf_path, output_path):
@@ -88,14 +98,50 @@ class DependencyBuilder:
         gnomad_path = os.path.join(self.data_dir, f'gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz')
         gnomad_df_path = os.path.join(self.data_dir, 'gnomad_frequencies.csv')
         if not os.path.exists(gnomad_df_path):
+
+            # Download gnomAD
             url = f"https://storage.googleapis.com/gcp-public-data--gnomad/papers/2019-sv/gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz"
-            cmd = f"""
-                curl -s "{url}" -o {gnomad_path}
-            """
-            p = self.worker(cmd)
+            self.download_file(url, gnomad_path)
 
             # Parse gnomAD
             self.get_gnomad_frequencies(gnomad_path, gnomad_df_path)
+
+
+    def get_reference(self):
+        """
+        hg38 reference genome is required (~1GB).
+        """
+        reference_path = os.path.join(self.data_dir, 'hg38.fa.gz')
+        reference_unzipped_path = os.path.join(self.data_dir, 'hg38.fa')
+        if not os.path.exists(reference_path):
+
+            # Download reference
+            url = 'https://hgdownload2.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz'
+            self.download_file(url, reference_path, binary = True)
+
+            # Reformat reference
+            self.worker(f"{os.path.join(self.conda_bin,'gunzip')} {reference_path}")
+            self.worker(f"{os.path.join(self.conda_bin,'bgzip')} -f {reference_unzipped_path}")
+
+
+    def get_cons_scores(self):
+        """
+        phyloP and phastCons scores are required to generate estimations of 
+        region conservation. The databases containg these scores weigh in at
+        around (~5GB).
+        """
+
+        conservation_links = [
+            'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phastCons100way.wib',
+            'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phyloP100way.wib',
+            'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phastCons100way.txt.gz',
+            'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phyloP100way.txt.gz',
+        ]
+
+        for cl in conservation_links:
+            cons_path = os.path.join(self.data_dir, os.path.basename(cl))
+            if not os.path.exists(cons_path):
+                self.download_file(cl, cons_path, binary = True)
 
 
     def build_breakpoints(self):
@@ -105,20 +151,10 @@ class DependencyBuilder:
         not already available, it will be downloaded into the folder indicated 
         in the config file (cnv_data).
         """
-        bp_path = os.path.join(self.data_dir, 'hg38_cytoband.tsv')
+        bp_path = os.path.join(self.data_dir, 'hg38_cytoband.tsv.gz')
         if not os.path.exists(bp_path):
             url = "http://hgdownload.cse.ucsc.edu/goldenPath/hg38/database/cytoBand.txt.gz"
-            cmd = f"""
-                curl -s "{url}" | gunzip -c > {bp_path}
-            """
-            p = subprocess.Popen(cmd,  stdout=subprocess.PIPE, shell = True)
-            out, err = p.communicate()
-            if err is not None:
-                error_message = f"""
-                Failed to download the cytogeneic coordinate data at:
-                {url}
-                """
-                raise error_message
+            self.download_file(url, bp_path, binary = True)
 
         centromere_df_path = os.path.join(self.data_dir, 'centromeres.csv')
         if not os.path.exists(centromere_df_path):
@@ -151,7 +187,7 @@ class DependencyBuilder:
         for use in feature generation.
         """
 
-        hi_ts_df_path = os.path.join(self.data_dir, 'hi_ti_gene.csv')
+        hi_ts_df_path = os.path.join(self.package_data_dir, 'hi_ts_regions.csv')
         hi_ts_parsed_path = os.path.join(self.data_dir, 'hi_ts_parsed.csv')
         if not os.path.exists(hi_ts_parsed_path):
 
@@ -207,9 +243,6 @@ class DependencyBuilder:
             hi_ts_df = hi_ts_df.fillna(value=null_cols)
             hi_ts_df.to_csv(hi_ts_parsed_path, index = False)
 
-        # Build scoring map
-        #     hi_ts_mapped_df.to_csv(hi_ts_map_path, index = False)
-
 
     def build_clinvar_db(self):
         """
@@ -219,17 +252,14 @@ class DependencyBuilder:
         clinvar_short_path = os.path.join(self.data_dir, 'clinvar.vcf.gz')
         if not os.path.exists(clinvar_short_path):
             clinvar_url = 'https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz'
-            # Download the vcf
-            cmd = f"""
-            curl -s "{clinvar_url}" -o {clinvar_short_path} 
-            """
-            p = self.worker(cmd)
+            self.download_file(clinvar_url, clinvar_short_path, binary = True)
+            
 
         if not os.path.exists(f"{clinvar_short_path}.tbi"):
 
             # Create an index file
             cmd = f"""
-            tabix -f {clinvar_short_path}
+            {os.path.join(self.conda_bin, 'tabix')} -f {clinvar_short_path}
             """
             p = self.worker(cmd)
 
@@ -240,10 +270,8 @@ class DependencyBuilder:
         """
         mim2_gene_url = 'https://ftp.ncbi.nih.gov/gene/DATA/mim2gene_medgen'
         output_file = os.path.join(self.data_dir, 'mim2gene_medgen')
-        cmd = f"""
-                curl -s "{mim2_gene_url}" -o {output_file}
-            """
-        p = self.worker(cmd)
+        if not os.path.exists(output_file):
+            self.download_file(mim2_gene_url, output_file)
 
 
     def build_all(self):
@@ -253,33 +281,43 @@ class DependencyBuilder:
 
         # Intialize progress bar
         bar_widgets = [progressbar.FormatLabel('Intializing'), ' ', progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage(), ' ', progressbar.Timer()]
-        bar = progressbar.ProgressBar(maxval=5, \
+        bar = progressbar.ProgressBar(maxval=7, \
             widgets=bar_widgets)
         bar.start()
 
         # Download and unpack gnomAD data
         # self.build_gnomad_db()
-        bar.update(1)
         bar_widgets[0] = progressbar.FormatLabel('Downloading chromosomal breakpoints')
+        bar.update(1)
         
         # Get chromosomal breakpoint data
         self.build_breakpoints()
-        bar.update(2)
         bar_widgets[0] = progressbar.FormatLabel('Downloading HI/TS data')
+        bar.update(2)
 
         # Download and unpack haploinsufficiency (HI) and triplosensitivity (TS) data
         self.build_hi_ts_data()
-        bar.update(3)
         bar_widgets[0] = progressbar.FormatLabel('Downloading ClinVar short variants')
+        bar.update(3)
 
         # Download and unpack ClinVar short variants
         self.build_clinvar_db()
-        bar.update(4)
         bar_widgets[0] = progressbar.FormatLabel('Downloading mim2gene file')
+        bar.update(4)
 
         # Download OMIM to gene annotations
         self.get_mim2gene()
+        bar_widgets[0] = progressbar.FormatLabel('Downloading reference (GRCh38)')
         bar.update(5)
+
+        # Download reference
+        self.get_reference()
+        bar_widgets[0] = progressbar.FormatLabel('Downloading conservation scores')
+        bar.update(6)
+
+        # Download conservation scores
+        self.get_cons_scores()
         bar_widgets[0] = progressbar.FormatLabel('Dependencies ready')
+        bar.update(7)
 
         bar.finish()

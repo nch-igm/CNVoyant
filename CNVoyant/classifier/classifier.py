@@ -11,13 +11,14 @@ import progressbar
 
 class Classifier():
 
-    def __init__(self, normalize_input = True):
+    def __init__(self, model_dir: str, normalize_input = True):
         self.random_seed = 42
         self.root_path = os.path.dirname(__file__)
-        self.re_trained = False
+        self.retrained = False
         self.dup_model = None
         self.del_model = None
         self.norm = normalize_input
+        self.model_dir = model_dir
 
     def train(self, input: pd.DataFrame, label: str):
         """
@@ -132,7 +133,7 @@ class Classifier():
         bar_widgets[0] = progressbar.FormatLabel('Model training complete')
 
 
-        self.re_trained = True
+        self.retrained = True
 
 
     def predict(self, input: pd.DataFrame):
@@ -196,12 +197,12 @@ class Classifier():
         bar_widgets[0] = progressbar.FormatLabel('Obtaining DEL predictions')
         bar.update(1)
 
-        if not self.re_trained:
+        if not self.retrained:
             
-            with open(os.path.join(self.root_path, 'models', 'del_model.pickle'), 'rb') as f:
+            with open(os.path.join(self.model_dir, 'del_model.pickle'), 'rb') as f:
                 self.del_calibrated_model = pickle.load(f)
 
-            with open(os.path.join(self.root_path, 'models', 'dup_model.pickle'), 'rb') as f:
+            with open(os.path.join(self.model_dir, 'dup_model.pickle'), 'rb') as f:
                 self.del_calibrated_model = pickle.load(f)
 
         del_pred = self.del_calibrated_model.predict_proba(X_del)
