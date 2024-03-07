@@ -48,9 +48,9 @@ class Classifier():
                 hs_ts_cols.append(f"{ht}_{col}")
 
         feature_cols = [
-            'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','%HI','pLI',
-            'LOEUF','GC_CONTENT','POP_FREQ','CLINVAR_DENSITY','PHYLOP_SCORE',
-            'PHASTCONS_SCORE'] + hs_ts_cols
+            'BP_LEN','GENE_COUNT','DISEASE_COUNT','EXON_COUNT','REG_COUNT',
+            'CENT_DIST','TEL_DIST','%HI','pLI', 'LOEUF','GC_CONTENT','POP_FREQ',
+            'CLINVAR_DENSITY','PHYLOP_SCORE','PHASTCONS_SCORE'] + hs_ts_cols
 
         # Divide training data by CNV type
         XY = input.copy()
@@ -161,10 +161,9 @@ class Classifier():
                 hs_ts_cols.append(f"{ht}_{col}")
 
         feature_cols = [
-            'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','%HI','pLI',
-            'LOEUF','GC_CONTENT','POP_FREQ','CLINVAR_DENSITY','PHYLOP_SCORE',
-            'PHASTCONS_SCORE'] + hs_ts_cols
-
+            'BP_LEN','GENE_COUNT','DISEASE_COUNT','EXON_COUNT','REG_COUNT',
+            'CENT_DIST','TEL_DIST','%HI','pLI', 'LOEUF','GC_CONTENT','POP_FREQ',
+            'CLINVAR_DENSITY','PHYLOP_SCORE','PHASTCONS_SCORE'] + hs_ts_cols
 
         # Divide training data by CNV type
         XY = input.copy()

@@ -17,7 +17,6 @@ from ..liftover.liftover import get_liftover_positions
 
 class DependencyBuilder:
 
-    # def __init__(self, data_dir: str = os.path.join(os.path.dirname(__file__), '..', 'data'), gnomadSV_version: str = '2.1'):
     def __init__(self, data_dir: str, gnomadSV_version: str = '2.1'):
 
         self.conda_bin = os.path.join(sys.exec_prefix, 'bin')
@@ -84,27 +83,29 @@ class DependencyBuilder:
                 rows.append([chrom, pos1, pos2, var_type, freq])
 
         df = pd.DataFrame(rows)
-        df.columns = ['chrom','start','stop','type','pop_freq']
-        df.to_csv(output_path, index = False)
+        # df.columns = ['chrom','start','stop','type','pop_freq']
+        df.to_csv(output_path, index = False, sep = '\t')
 
         
     
     def build_gnomad_db(self):
         """
         gnomadSV data is needed in order to generate population frequencies for 
-        the indicated CNVs. It is quite large when unzipped (~2GB). Be sure to 
-        account for this before running.
+        the indicated CNVs. It is larger when unzipped (~31MB). 
         """
-        gnomad_path = os.path.join(self.data_dir, f'gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz')
-        gnomad_df_path = os.path.join(self.data_dir, 'gnomad_frequencies.csv')
+        gnomad_path = os.path.join(self.package_data_dir,'gnomad4.bed.gz')
+        gnomad_df_path = os.path.join(self.data_dir, 'gnomad_frequencies.bed')
         if not os.path.exists(gnomad_df_path):
+            
+            df = pd.read_csv(gnomad_path, sep = '\t')
+            df.to_csv(gnomad_df_path, sep = '\t', index = False, header = None)
 
             # Download gnomAD
-            url = f"https://storage.googleapis.com/gcp-public-data--gnomad/papers/2019-sv/gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz"
-            self.download_file(url, gnomad_path)
+            # url = f"https://storage.googleapis.com/gcp-public-data--gnomad/papers/2019-sv/gnomad_v{self.gnomadSV_version}_sv.sites.vcf.gz"
+            # self.download_file(url, gnomad_path, binary = True)
 
-            # Parse gnomAD
-            self.get_gnomad_frequencies(gnomad_path, gnomad_df_path)
+            # # Parse gnomAD
+            # self.get_gnomad_frequencies(gnomad_path, gnomad_df_path)
 
 
     def get_reference(self):
@@ -132,10 +133,12 @@ class DependencyBuilder:
         """
 
         conservation_links = [
-            'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phastCons100way.wib',
-            'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phyloP100way.wib',
-            'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phastCons100way.txt.gz',
-            'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phyloP100way.txt.gz',
+        #     'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phastCons100way.wib',
+        #     'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phyloP100way.wib',
+        #     'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phastCons100way.txt.gz',
+        #     'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phyloP100way.txt.gz',
+              'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/phyloP100way/hg38.phyloP100way.bw',
+              'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/phastCons100way/hg38.phastCons100way.bw'
         ]
 
         for cl in conservation_links:
@@ -281,7 +284,7 @@ class DependencyBuilder:
 
         # Intialize progress bar
         bar_widgets = [progressbar.FormatLabel('Intializing'), ' ', progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage(), ' ', progressbar.Timer()]
-        bar = progressbar.ProgressBar(maxval=7, \
+        bar = progressbar.ProgressBar(maxval=8, \
             widgets=bar_widgets)
         bar.start()
 
@@ -307,17 +310,22 @@ class DependencyBuilder:
 
         # Download OMIM to gene annotations
         self.get_mim2gene()
-        bar_widgets[0] = progressbar.FormatLabel('Downloading reference (GRCh38)')
+        bar_widgets[0] = progressbar.FormatLabel(f'Unpacking gnomAD (v4)')
         bar.update(5)
+
+        # Download gnomAD
+        self.build_gnomad_db()
+        bar_widgets[0] = progressbar.FormatLabel('Downloading reference (GRCh38)')
+        bar.update(6)
 
         # Download reference
         self.get_reference()
         bar_widgets[0] = progressbar.FormatLabel('Downloading conservation scores')
-        bar.update(6)
+        bar.update(7)
 
         # Download conservation scores
         self.get_cons_scores()
         bar_widgets[0] = progressbar.FormatLabel('Dependencies ready')
-        bar.update(7)
+        bar.update(8)
 
         bar.finish()

@@ -3,19 +3,34 @@ import numpy as np
 import sys
 import os
 import re
+import shutil
+import shlex
 import math
 import json
 import subprocess
 import sys
 import progressbar
 import vcf
-# import pyranges as pr
+import pyBigWig
+import pybedtools
 from ..liftover.liftover import get_liftover_positions
+pd.set_option('future.no_silent_downcasting', True)
 
 
 class FeatureBuilder:
 
     def __init__(self, variant_df: pd.DataFrame, data_dir: str):
+
+
+        def worker(cmd):
+            """
+            Runs a bash command using subprocess module
+            """
+            try:
+                output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
+            except subprocess.CalledProcessError as e:
+                output = e.output
+            return output.decode('utf-8')
 
         print('Loading dependencies')
 
@@ -23,11 +38,54 @@ class FeatureBuilder:
         self.conda_bin = os.path.join(sys.exec_prefix, 'bin')
 
         # Set variants
-        self.variant_df = variant_df
+        pd.Series(list(range(1,23)) + ['X','Y'])
+        self.variant_df = variant_df.sort_values(['CHROMOSOME','START'])
 
         # Get root path
         self.data_dir = data_dir
+        self.temp_data_dir = os.path.join(self.data_dir,'temp')
+        if not os.path.exists(self.temp_data_dir):
+            os.mkdir(self.temp_data_dir)
         self.package_data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
+
+        # Output variants for limiting databases
+        self.vars_bed = os.path.join(self.temp_data_dir,'vars.bed')
+        self.vars_chr_bed = os.path.join(self.temp_data_dir,'vars_chr.bed')
+        self.variant_df[['CHROMOSOME','START','END']].drop_duplicates().to_csv(self.vars_bed, sep = '\t', index = False, header = None)
+        self.variant_df['CHROMOSOME'] = self.variant_df['CHROMOSOME'].apply(lambda x: f"chr{x}")
+        self.variant_df[['CHROMOSOME','START','END']].drop_duplicates().to_csv(self.vars_chr_bed, sep = '\t', index = False, header = None)
+        
+        # Limit gnomAD
+        self.gnomad_path = os.path.join(self.data_dir,'gnomad_frequencies.bed')
+        self.temp_gnomad_path = os.path.join(self.temp_data_dir,'gnomad_frequencies.bed')
+        a = pybedtools.BedTool(self.gnomad_path)
+        a.intersect(self.vars_chr_bed, u = True).saveas(self.temp_gnomad_path)
+        # worker(f"{os.path.join(self.conda_bin, 'bedtools')} intersect -a {self.gnomad_path} -b {self.vars_chr_bed} > {self.temp_gnomad_path}")
+
+        # Limit ClinVar
+        self.clinvar_path = os.path.join(self.data_dir, 'clinvar.vcf.gz')
+        self.temp_clinvar_path = os.path.join(self.temp_data_dir, 'clinvar.vcf')
+        a = pybedtools.BedTool(self.clinvar_path)
+        a.intersect(self.vars_bed, header = True, u = True).saveas(self.temp_clinvar_path)
+        worker(f"{os.path.join(self.conda_bin, 'bcftools')} view -i \"INFO/CLNSIG[*] == 'Likely_pathogenic' | INFO/CLNSIG[*] == 'Pathogenic'\" -Oz -o {self.temp_clinvar_path}.gz {self.temp_clinvar_path}")
+        self.temp_clinvar_path += '.gz'
+        worker(f"{os.path.join(self.conda_bin, 'tabix')} -f {self.temp_clinvar_path}")
+
+        # Limit exome data
+        self.exome_path = os.path.join(self.package_data_dir, 'exons.bed')
+        self.temp_exome_path = os.path.join(self.temp_data_dir, 'exons.bed')
+        a = pybedtools.BedTool(self.exome_path)
+        a.intersect(self.vars_chr_bed, u = True).saveas(self.temp_exome_path)
+        # worker(f"{os.path.join(self.conda_bin, 'bedtools')} intersect -a {self.exome_path} -b {self.vars_chr_bed} > {self.temp_exome_path}")
+
+        # Limit regulatory regions
+        self.reg_path = os.path.join(self.package_data_dir, 'reg_regions.bed')
+        self.temp_reg_path = os.path.join(self.temp_data_dir, 'reg_regions.bed')
+        a = pybedtools.BedTool(self.reg_path)
+        a.intersect(self.vars_chr_bed, u = True).saveas(self.temp_reg_path)
+        # worker(f"{os.path.join(self.conda_bin, 'bedtools')} intersect -a {self.reg_path} -b {self.vars_chr_bed} > {self.temp_reg_path}")
+
+        # Get other resources
         self.ref = os.path.join(self.data_dir, 'hg38.fa.gz')
         self.centromere_df = pd.read_csv(os.path.join(self.data_dir, 'centromeres.csv'), index_col = 0)
         self.telomere_df = pd.read_csv(os.path.join(self.data_dir, 'telomeres.csv'),  index_col = 0)
@@ -36,37 +94,32 @@ class FeatureBuilder:
             'GRCh38_start':'START',
             'GRCh38_stop':'END'
         })
+        self.gene_position_df['CHROMOSOME'] = self.gene_position_df['CHROMOSOME'].apply(lambda x: f"chr{x}")
         self.gene_position = {chrom: self.gene_position_df[self.gene_position_df['CHROMOSOME'] == chrom] for chrom in self.gene_position_df['CHROMOSOME'].unique()}
-
-        # self.gene_position_ranges = pr.PyRanges(
-        #         chromosomes=self.gene_position_df['CHROMOSOME'],
-        #         starts=self.gene_position_df['START'],
-        #         ends=self.gene_position_df['END']
-        #     )
-
-        # Replace nulls with -999 for genes with no gene associations
         self.mim2gene = pd.read_csv(os.path.join(self.data_dir, 'mim2gene_medgen'), sep = '\t')
         self.mim2gene.loc[self.mim2gene['GeneID'].str.contains('-'), 'GeneID'] = -999
         self.mim2gene = self.mim2gene.astype({'GeneID': int})
         self.mim2gene.columns = ['OMIM ID'] + self.mim2gene.columns[1:].to_list()
 
-        self.gnomadSV_df = pd.read_csv(os.path.join(self.package_data_dir, 'gnomad4.csv.gz'), dtype = {'CHROM': str}).rename(columns = {'CHROM':'CHROMOSOME'})
-        self.gnomadSV_df['CHROMOSOME'] = self.gnomadSV_df['CHROMOSOME'].str[3:]
+        self.gnomadSV_df = pd.read_csv(self.temp_gnomad_path, sep = '\t')
+        self.gnomadSV_df.columns = ['CHROMOSOME','START','END','TYPE','POP_FREQ']
+        self.gnomadSV_df = self.gnomadSV_df.astype({'CHROMOSOME': str})
+        # self.gnomadSV_df['CHROMOSOME'] = self.gnomadSV_df['CHROMOSOME'].str[3:]
         self.gnomadSV = {t: {chrom: self.gnomadSV_df[(self.gnomadSV_df['CHROMOSOME'] == chrom) & (self.gnomadSV_df['TYPE'] == t)] for chrom in self.gnomadSV_df['CHROMOSOME'].unique()} for t in ['DEL','DUP']}
-        # self.gnomadSV_ranges = {t: {chrom: pr.PyRanges(
-        #     chromosomes=self.gnomadSV[t][chrom]['CHROMOSOME'],
-        #     starts=self.gnomadSV[t][chrom]['START'],
-        #     ends=self.gnomadSV[t][chrom]['END']
-        # ) for chrom in self.gnomadSV[t].keys()} for t in ['DEL','DUP']}
 
+        self.exome_df = pd.read_csv(self.temp_exome_path, sep = '\t')
+        self.exome_df.columns = ['CHROMOSOME','START','END','SENSE','ID']
+        self.exome_df = self.exome_df.astype({'CHROMOSOME': str})
+        # self.gnomadSV_df['CHROMOSOME'] = self.gnomadSV_df['CHROMOSOME'].str[3:]
+        self.exon_data = {chrom: self.exome_df[(self.exome_df['CHROMOSOME'] == chrom)] for chrom in self.exome_df['CHROMOSOME'].unique()}
+
+        self.reg_df = pd.read_csv(self.temp_reg_path, sep = '\t')
+        self.reg_df.columns = ['CHROMOSOME','START','END','ID']
+        self.reg_data = {chrom: self.reg_df[(self.reg_df['CHROMOSOME'] == chrom)] for chrom in self.reg_df['CHROMOSOME'].unique()}
 
         self.hi_ts_df = pd.read_csv(os.path.join(self.data_dir, 'hi_ts_parsed.csv'))
+        self.hi_ts_df['CHROMOSOME'] = self.hi_ts_df['CHROMOSOME'].apply(lambda x: f"chr{x}")
         self.hi_ts = {chrom: self.hi_ts_df[self.hi_ts_df['CHROMOSOME'] == chrom] for chrom in self.hi_ts_df['CHROMOSOME'].unique()}
-        # self.hi_ts_ranges = {chrom: pr.PyRanges(
-        #     chromosomes=self.hi_ts[chrom][self.hi_ts[chrom]['CHROMOSOME'] == chrom]['CHROMOSOME'],  # Assuming there's a 'CHROMOSOME' column
-        #     starts=self.hi_ts[chrom][self.hi_ts[chrom]['CHROMOSOME'] == chrom]['START'],
-        #     ends=self.hi_ts[chrom][self.hi_ts[chrom]['CHROMOSOME'] == chrom]['END']
-        # ) for chrom in self.hi_ts.keys()}
 
         # Create a breakpoint dataframe to determine chromosome arm length
         self.breakpoint_df = self.centromere_df.merge(self.telomere_df, on = 'CHROMOSOME', suffixes = ('_cen','_tel'))
@@ -74,29 +127,29 @@ class FeatureBuilder:
         self.breakpoint_df['arm2_len'] = self.breakpoint_df['end_tel'] - self.breakpoint_df['end_cen']
 
         # Conservation data
-        # self.phylop_df = pd.read_csv('/igm/home/rsrxs003/rnb/output/BL-384/cons_score.csv', index_col=0)
-        # self.phastcons_df = pd.read_csv('/igm/home/rsrxs003/rnb/output/BL-384/phastcons_score.csv', index_col=0)
-        cols = ['bin', 'CHROMOSOME', 'minPos', 'maxPos', 'name', 'width', 'count', 'offset', 'wibName', 'lowerLimit', 'dataRange', 'validCount', 'sumData', 'sumSquares']
-        cols_ = ['CHROMOSOME','minPos','maxPos','width','count','offset','lowerLimit','dataRange']
-        col_types = {'minPos':int,'maxPos':int,'width':int,'count':int,'offset':int,'lowerLimit':float,'dataRange':float}
+        # cols = ['bin', 'CHROMOSOME', 'minPos', 'maxPos', 'name', 'width', 'count', 'offset', 'wibName', 'lowerLimit', 'dataRange', 'validCount', 'sumData', 'sumSquares']
+        # cols_ = ['CHROMOSOME','minPos','maxPos','width','count','offset','lowerLimit','dataRange']
+        # col_types = {'minPos':int,'maxPos':int,'width':int,'count':int,'offset':int,'lowerLimit':float,'dataRange':float}
 
         # PhyloP
-        self.phylop = pd.read_csv(os.path.join(self.data_dir,'phyloP100way.txt.gz'), sep = '\t')
-        self.phylop.columns = cols
-        self.phylop = self.phylop[cols_].astype(col_types)
-        self.phylop['CHROMOSOME'] = self.phylop['CHROMOSOME'].str[3:]
-        self.phylop = {chrom: self.phylop[self.phylop['CHROMOSOME'] == chrom] for chrom in self.phylop['CHROMOSOME'].unique()}
-        with open(os.path.join(self.data_dir,'phyloP100way.wib'),'rb') as f:
-            self.phylop_wib = f.read()
+        self.phlyop_bw = pyBigWig.open(os.path.join(self.data_dir,'phylop_mvg_avg.bw'))
+        # self.phylop = pd.read_csv(os.path.join(self.data_dir,'phyloP100way.txt.gz'), sep = '\t')
+        # self.phylop.columns = cols
+        # self.phylop = self.phylop[cols_].astype(col_types)
+        # self.phylop['CHROMOSOME'] = self.phylop['CHROMOSOME'].str[3:]
+        # self.phylop = {chrom: self.phylop[self.phylop['CHROMOSOME'] == chrom] for chrom in self.phylop['CHROMOSOME'].unique()}
+        # with open(os.path.join(self.data_dir,'phyloP100way.wib'),'rb') as f:
+        #     self.phylop_wib = f.read()
 
         # phastCons
-        self.phastcons = pd.read_csv(os.path.join(self.data_dir,'phastCons100way.txt.gz'), sep = '\t')
-        self.phastcons.columns = cols
-        self.phastcons = self.phastcons[cols_].astype(col_types)
-        self.phastcons['CHROMOSOME'] = self.phastcons['CHROMOSOME'].str[3:]
-        self.phastcons = {chrom: self.phastcons[self.phastcons['CHROMOSOME'] == chrom] for chrom in self.phastcons['CHROMOSOME'].unique()}
-        with open(os.path.join(self.data_dir,'phastCons100way.wib'),'rb') as f:
-            self.phastcons_wib = f.read()
+        self.phastcons_bw = pyBigWig.open(os.path.join(self.data_dir,'phastcons_mvg_avg.bw'))
+        # self.phastcons = pd.read_csv(os.path.join(self.data_dir,'phastCons100way.txt.gz'), sep = '\t')
+        # self.phastcons.columns = cols
+        # self.phastcons = self.phastcons[cols_].astype(col_types)
+        # self.phastcons['CHROMOSOME'] = self.phastcons['CHROMOSOME'].str[3:]
+        # self.phastcons = {chrom: self.phastcons[self.phastcons['CHROMOSOME'] == chrom] for chrom in self.phastcons['CHROMOSOME'].unique()}
+        # with open(os.path.join(self.data_dir,'phastCons100way.wib'),'rb') as f:
+        #     self.phastcons_wib = f.read()
 
         # Null HI/TS res
         hi_ts_cols = ['NO_EVIDENCE','LITTLE_EVIDENCE','EMERGING_EVIDENCE',
@@ -112,6 +165,13 @@ class FeatureBuilder:
             **{f"TS_{c}":0 for c in hi_ts_cols}
         }
 
+
+    def remove_temp_files(self):
+        """
+        Remove temporary files created during the feature building process
+        """
+        shutil.rmtree(self.temp_data_dir)
+        
 
     def get_features(self):#, clinvar_ids: list): 
         """
@@ -139,6 +199,9 @@ class FeatureBuilder:
             Query the gene position table to find the intersecting genes
             """        
 
+            if row['CHROMOSOME'] not in self.gene_position.keys():
+                return []
+
             gene_position = self.gene_position[row['CHROMOSOME']]
             df = gene_position.loc[
                         (gene_position['START'].between(row['START'], row['END']))
@@ -148,23 +211,8 @@ class FeatureBuilder:
                         ((gene_position['START'] <= row['START']) & (gene_position['END'] >= row['END']))
                 ]    
 
-            # row_interval = pr.PyRanges(
-            #     chromosomes=[row['CHROMOSOME']],
-            #     starts=[row['START']],
-            #     ends=[row['END']]
-            # )
-
-            # intersect_df = self.gene_position.intersect(row_interval).df.rename(columns = {
-            #     'Chromosome':'CHROMOSOME',
-            #     'Start':'START',
-            #     'End':'END'
-            # })
-
             if df.empty:
                 return []
-
-            # intersect_df = intersect_df.merge(self.gene_position_df, on = ['CHROMOSOME','START','END'])
-
                 
             return df['GeneID'].to_list()
 
@@ -192,12 +240,14 @@ class FeatureBuilder:
             the distance of the CNV to the centromere (normalized by chromosome 
             arm length)
             """
-            cen_start, cen_end = self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'start_cen'], self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'end_cen']
-            arm1_len, arm2_len = self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'arm1_len'], self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'arm2_len']
+            cen_start, cen_end = self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'start_cen'], self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'end_cen']
+            arm1_len, arm2_len = self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'arm1_len'], self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'arm2_len']
             if row['END'] < cen_start:
-                return (cen_start - row['END']) / arm1_len
+                # return (cen_start - row['END']) / arm1_len
+                return cen_start - row['END']
             else:
-                return (row['START'] - cen_end) / arm2_len
+                # return (row['START'] - cen_end) / arm2_len
+                return row['START'] - cen_end
 
 
         def get_telomere_distance(row):
@@ -206,17 +256,19 @@ class FeatureBuilder:
             distance of the CNV to the telomere (normalized by chromosome arm 
             length)
             """
-            tel_start, tel_end = self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'start_tel'], self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'end_tel']
-            cen_start, cen_end = self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'start_cen'], self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'end_cen']
-            arm1_len, arm2_len = self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'arm1_len'], self.breakpoint_df.loc[f"chr{row['CHROMOSOME']}", 'arm2_len']
+            tel_start, tel_end = self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'start_tel'], self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'end_tel']
+            cen_start, cen_end = self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'start_cen'], self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'end_cen']
+            arm1_len, arm2_len = self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'arm1_len'], self.breakpoint_df.loc[f"{row['CHROMOSOME']}", 'arm2_len']
             if row['END'] < cen_start:
-                return (row['START'] - tel_start) / arm1_len
+                # return (row['START'] - tel_start) / arm1_len
+                return row['START'] - tel_start
             else:
-                return (tel_end - row['END']) / arm2_len
+                # return (tel_end - row['END']) / arm2_len
+                return tel_end - row['END']
 
 
         def get_gc_content(row):
-            command = f"{os.path.join(self.conda_bin,'samtools')} faidx {self.ref} chr{row['CHROMOSOME']}:{row['START']}-{row['END']}"
+            command = f"{os.path.join(self.conda_bin,'samtools')} faidx {self.ref} {row['CHROMOSOME']}:{row['START']}-{row['END']}"
             p = subprocess.Popen(command,  stdout=subprocess.PIPE, shell = True)
             out, err = p.communicate()
             s = "".join(out.decode().strip().split()[1:])
@@ -236,37 +288,10 @@ class FeatureBuilder:
             intersects with any HS or TS regions, and to what extent.
             """
 
-            # def get_region_coverage(row, cnv_start, cnv_end):
-            #     left = max(cnv_start, row['START'])
-            #     right = min(cnv_end, row['END'])
-            #     num = left - right
-            #     denom = row['START'] - row['END']
-            #     return num / denom
+            if row['CHROMOSOME'] not in self.hi_ts.keys():
+                return self.null_hi_ts
 
             hi_ts_df = self.hi_ts[row['CHROMOSOME']]
-
-            # Filter to only include regions intersecting with CNV
-            # df = self.hi_ts_df.loc[
-            #     (self.hi_ts_df['CHROMOSOME'] == row['CHROMOSOME']) 
-            #             & 
-            #         (
-            #             (self.hi_ts_df['START'].between(row['START'], row['END']))
-            #                 |
-            #             (self.hi_ts_df['START'].between(row['START'], row['END']))
-            #         )
-            #     ]
-
-            # row_range = pr.PyRanges(
-            #     chromosomes=[row['CHROMOSOME']],
-            #     starts=[row['START']],
-            #     ends=[row['END']]
-            # )
-
-            # intersect_df = hi_ts_ranges.intersect(row_range).df.rename(columns = {
-            #     'Chromosome':'CHROMOSOME',
-            #     'Start':'START',
-            #     'End':'END'
-            # })
 
             df = hi_ts_df.loc[
                         (hi_ts_df['START'].between(row['START'], row['END']))
@@ -275,7 +300,6 @@ class FeatureBuilder:
                             |
                         ((hi_ts_df['START'] <= row['START']) & (hi_ts_df['END'] >= row['END']))
                 ]
-
 
             # Exit if the dataframe is empty
             hi_ts = ['HI','TS']
@@ -286,8 +310,6 @@ class FeatureBuilder:
 
             if df.empty:
                 return self.null_hi_ts
-
-            # df = df.merge(hi_ts_df, on = ['CHROMOSOME','START','END'])
 
             # Return the score of the worst intersecting HI/TS region
             res = {
@@ -310,14 +332,12 @@ class FeatureBuilder:
             in intersecting variants
             """
 
-            # def get_region_coverage(row, cnv_start, cnv_end):
-            #     left = max(cnv_start, row['START'])
-            #     right = min(cnv_end, row['stop'])
-            #     num = left - right
-            #     denom = row['start'] - row['stop']
-            #     return num / denom
+            if row['CHANGE'] not in self.gnomadSV.keys():
+                return 0
 
-            # gnomad_ranges = self.gnomadSV_ranges[row['CHANGE']][row['CHROMOSOME']]
+            if row['CHROMOSOME'] not in self.gnomadSV[row['CHANGE']].keys():
+                return 0
+
             gnomad_df = self.gnomadSV[row['CHANGE']][row['CHROMOSOME']]
 
             df = gnomad_df.loc[
@@ -328,28 +348,8 @@ class FeatureBuilder:
                 ((gnomad_df['START'] <= row['START']) & (gnomad_df['END'] >= row['END']))
             ]
 
-            # gnomad_ranges = pr.PyRanges(
-            #     chromosomes=gnomad_df['CHROMOSOME'],  # Assuming there's a 'CHROMOSOME' column
-            #     starts=gnomad_df['START'],
-            #     ends=gnomad_df['END']
-            # )
-
-            # row_range = pr.PyRanges(
-            #     chromosomes=[row['CHROMOSOME']],
-            #     starts=[row['START']],
-            #     ends=[row['END']]
-            # )
-
-            # intersect_df = gnomad_ranges.intersect(row_range).df.rename(columns = {
-            #     'Chromosome':'CHROMOSOME',
-            #     'Start':'START',
-            #     'End':'END'
-            # })
-
             if df.empty:
                 return 0
-
-            # gnomad_df = intersect_df.merge(self.gnomadSV[row['CHANGE']][row['CHROMOSOME']], on = ['CHROMOSOME','START','END'])
             
             df['percent_coverage'] = (
             df[['START', 'END']].clip(lower=row['START'], upper=row['END']).diff(axis=1) / 
@@ -364,128 +364,134 @@ class FeatureBuilder:
 
         
         def get_clinvar_path_density(row, clinvar_reader):
-            path_count = 0
-            query = clinvar_reader.fetch(chrom = row['CHROMOSOME'], start = row['START'], end = row['END'])
-            for q in query:
+            try:
+                query = clinvar_reader.fetch(chrom = row['CHROMOSOME'][3:], start = row['START'], end = row['END'])
+                return len([q for q in query])
+            except:
+                return 0
+            
+
+        # def moving_average(values, window_size):
+        #     """
+        #     Calculate the moving average using a specified window size.
+
+        #     Parameters:
+        #     values (array-like): The input data for which the moving average is computed.
+        #     window_size (int): The size of the moving window.
+
+        #     Returns:
+        #     array-like: The moving average of the input data.
+        #     """
+        #     if window_size < 1:
+        #         raise ValueError("Window size must be at least 1")
+
+        #     # Create a window: using a uniform weight (simple moving average)
+        #     window = np.ones(int(window_size)) / float(window_size)
+
+        #     # Compute the moving average using convolution
+        #     moving_avg = np.convolve(values, window, 'valid')
+
+        #     return moving_avg
+
+
+        # def get_wib_values(cons_df, wib_data):
+
+        #     chroms, starts, steps, values = [], [], [], []
+
+        #     for idx, row in cons_df.iterrows():
+
+        #         for i in range(row['count']):
+        #             byte_value = wib_data[row['offset'] + i]
+        #             if byte_value < 128:
+        #                 value = row['lowerLimit'] + (row['dataRange'] * (byte_value / 127.0))
+        #                 chroms.append(row['CHROMOSOME'])
+        #                 starts.append(row['minPos'] + i * row['width'])
+        #                 steps.append(row['width'])
+        #                 values.append(value)
+
+        #     return pd.DataFrame({
+        #         'chrom': chroms,
+        #         'start': starts,
+        #         'step': steps,
+        #         'value': values
+        #     })
+
+
+        # def get_cons(row, window_size, cons, wib):
+        def get_cons(row, window_size, bw):
+
+            # # Get necessary rows from wiggle
+            # cons_df = cons[row['CHROMOSOME']]
+            # cons_df = cons_df[
+            #     (row['START'] - window_size <= cons_df['maxPos'] )
+            #         &
+            #     (cons_df['minPos'] <= row['END'] + window_size)
+            # ]
+
+            # # Get wib values
+            # wib_values = get_wib_values(cons_df, wib)
+            # wib_values = wib_values[['start','value']].rename(columns = 
+            #                                         {'start':'POS','value':'VALUE'})
+            # wib_values = wib_values[wib_values['POS'].between(
+            #     row['START'] - (window_size / 2), row['END'] + (window_size / 2))]
+            try: # Take maximum
+                return bw.stats(f"{row['CHROMOSOME']}", int(row['START']), int(row['END']), type = 'max')[0]
+
+            except:
+
                 try:
-                    if re.search('PATHOGENIC', q.INFO['CLNSIG'][0].upper()):
-                        path_count += 1
-                except:
-                    pass
-            return path_count
+                    return bw.stats(f"{row['CHROMOSOME']}", int(row['START']), int(row['END']) + 1, type = 'max')[0]
 
 
-        def moving_average(values, window_size):
-            """
-            Calculate the moving average using a specified window size.
-
-            Parameters:
-            values (array-like): The input data for which the moving average is computed.
-            window_size (int): The size of the moving window.
-
-            Returns:
-            array-like: The moving average of the input data.
-            """
-            if window_size < 1:
-                raise ValueError("Window size must be at least 1")
-
-            # Create a window: using a uniform weight (simple moving average)
-            window = np.ones(int(window_size)) / float(window_size)
-
-            # Compute the moving average using convolution
-            moving_avg = np.convolve(values, window, 'valid')
-
-            return moving_avg
-
-
-        def get_wib_values(cons_df, wib_data):
-
-            chroms, starts, steps, values = [], [], [], []
-
-            for idx, row in cons_df.iterrows():
-
-                for i in range(row['count']):
-                    byte_value = wib_data[row['offset'] + i]
-                    if byte_value < 128:
-                        value = row['lowerLimit'] + (row['dataRange'] * (byte_value / 127.0))
-                        chroms.append(row['CHROMOSOME'])
-                        starts.append(row['minPos'] + i * row['width'])
-                        steps.append(row['width'])
-                        values.append(value)
-
-            return pd.DataFrame({
-                'chrom': chroms,
-                'start': starts,
-                'step': steps,
-                'value': values
-            })
-
-
-        def get_cons(row, window_size, cons, wib):
-
-            # Get necessary rows from wiggle
-            cons_df = cons[row['CHROMOSOME']]
-            cons_df = cons_df[
-                (row['START'] - window_size <= cons_df['maxPos'] )
-                    &
-                (cons_df['minPos'] <= row['END'] + window_size)
-            ]
-
-            # Get wib values
-            wib_values = get_wib_values(cons_df, wib)
-            wib_values = wib_values[['start','value']].rename(columns = 
-                                                    {'start':'POS','value':'VALUE'})
-            wib_values = wib_values[wib_values['POS'].between(
-                row['START'] - (window_size / 2), row['END'] + (window_size / 2))]
-
-            # Get rolling average
-            mov_avg = moving_average(wib_values['VALUE'], window_size)
-
-            # Take maximum
-            return mov_avg.max().round(5)
-    
-
-
-        def get_ptriplo(row, c_data):
-            try:
-                max_ = c_data[c_data['geneID'].isin(row['gene_info'])]['pHaplo'].max()
-                return max_ if not pd.isna(max_) else 0
-            except:
-                return 0
-        
-
-        def get_htriplo(row, c_data):
-            try:
-                max_ = c_data[c_data['geneID'].isin(row['gene_info'])]['pTriplo'].max()
-                return max_ if not pd.isna(max_) else 0
-            except:
-                return 0
-
-
-        def get_collins_data(row, c_data_full, col, func_):
-            try:
-                if func_ == 'max':
-                    max_ = c_data_full[c_data_full['geneID'].isin(row['gene_info'])][col].max()
-                    return max_ if not pd.isna(max_) else 0
-                elif func_ == 'min':
-                    min_ = c_data_full[c_data_full['geneID'].isin(row['gene_info'])][col].min()
-                    return min_ if not pd.isna(min_) else 1
-                elif func_ == 'mean':
-                    mean_ = c_data_full[c_data_full['geneID'].isin(row['gene_info'])][col].mean()
-                    return mean_ if not pd.isna(mean_) else 0.5
-            except:
-                if func_ == 'max':
+                except Exception as e:
+                    print(f"{row['CHROMOSOME']}", row['START'], row['END'])
+                    print(type(e), e)
                     return 0
-                elif func_ == 'min':
-                    return 1
-                else:
-                    return 0
+
+
+        def get_exon_count(row):
+            """
+            Get the number of exons that are spanned by the CNV
+            """
+
+            if row['CHROMOSOME'] not in self.exon_data.keys():
+                return 0    
+
+            exon_df = self.exon_data[row['CHROMOSOME']]
+            df = exon_df.loc[
+                        (exon_df['START'].between(row['START'], row['END']))
+                            |
+                        (exon_df['END'].between(row['START'], row['END']))
+                            |
+                        ((exon_df['START'] <= row['START']) & (exon_df['END'] >= row['END']))
+                ]
+
+            return len(df.index)
+
+        def get_reg_count(row):
+            """
+            Get the number of regulatory regions that are spanned by the CNV
+            """
+
+            if row['CHROMOSOME'] not in self.reg_data.keys():
+                return 0    
+
+            reg_df = self.reg_data[row['CHROMOSOME']]
+            df = reg_df.loc[
+                        (reg_df['START'].between(row['START'], row['END']))
+                            |
+                        (reg_df['END'].between(row['START'], row['END']))
+                            |
+                        ((reg_df['START'] <= row['START']) & (reg_df['END'] >= row['END']))
+                ]
+
+            return len(df.index)
 
         cnv_df = self.variant_df.copy()
 
         # Intialize progress bar
         bar_widgets = [progressbar.FormatLabel('Building Features'), ' ', progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage(), ' ', progressbar.Timer()]
-        bar = progressbar.ProgressBar(maxval=12, \
+        bar = progressbar.ProgressBar(maxval=15, \
             widgets=bar_widgets)
         bar_widgets[0] = progressbar.FormatLabel('Ensuring positions are in hg38')
         bar.start()
@@ -514,9 +520,10 @@ class FeatureBuilder:
         bar.update(4)
         cnv_df['DISEASE_COUNT'] = cnv_df.apply(get_omim_disease_genes, axis = 1)
 
-        bar_widgets[0] = progressbar.FormatLabel('Calculating centromere distance count')
+        bar_widgets[0] = progressbar.FormatLabel('Calculating genomic position')
         bar.update(5)
         cnv_df['CENT_DIST'] = cnv_df.apply(get_centromere_distance, axis = 1)
+        cnv_df['TEL_DIST'] = cnv_df.apply(get_telomere_distance, axis = 1)
 
         bar_widgets[0] = progressbar.FormatLabel('Calculating HI/TS coverage')
         bar.update(6)
@@ -535,41 +542,51 @@ class FeatureBuilder:
         bar.update(9)
 
         # Create reader of ClinVar short variants
-        clinvar_path = os.path.join(self.data_dir, 'clinvar.vcf.gz')
-        clinvar_reader = vcf.Reader(filename = clinvar_path, compressed=True, encoding='ISO-8859-1')
+        clinvar_reader = vcf.Reader(filename = self.temp_clinvar_path, compressed=True, encoding='ISO-8859-1')
         cnv_df['CLINVAR_DENSITY'] = cnv_df.apply(get_clinvar_path_density, clinvar_reader = clinvar_reader, axis = 1)
         
-        bar_widgets[0] = progressbar.FormatLabel('ClinVar density generated')
+        bar_widgets[0] = progressbar.FormatLabel('Calculating conservation scores')
         bar.update(10)
         cnv_df['PHYLOP_SCORE'] = cnv_df.apply(
             get_cons, 
             window_size = 200,
-            cons = self.phylop,
-            wib = self.phylop_wib,
+            # cons = self.phylop,
+            # wib = self.phylop_wib,
+            bw = self.phlyop_bw,
             axis = 1)
         cnv_df['PHASTCONS_SCORE'] = cnv_df.apply(
             get_cons, 
             window_size = 5000,
-            cons = self.phastcons,
-            wib = self.phastcons_wib,
+            # cons = self.phastcons,
+            # wib = self.phastcons_wib,
+            bw = self.phastcons_bw,
             axis = 1)
+        bar_widgets[0] = progressbar.FormatLabel('Calculating exon count')
+        bar.update(12)
 
+        cnv_df['EXON_COUNT'] = cnv_df.apply(get_exon_count, axis = 1)
+        bar_widgets[0] = progressbar.FormatLabel('Calculating regulatory region count')
+        bar.update(13)
+
+        cnv_df['REG_COUNT'] = cnv_df.apply(get_reg_count, axis = 1)
         bar_widgets[0] = progressbar.FormatLabel('All features generated, normalizing')
-        bar.update(11)
+        bar.update(14)
 
         # Fill NAs
-        cnv_df = cnv_df.fillna({
+        na_vals = {
             'GC_CONTENT': cnv_df['GC_CONTENT'].median(),
             'CLINVAR_DENSITY': 0,
             'POP_FREQ': 0,
             'PHYLOP_SCORE': cnv_df['PHYLOP_SCORE'].min(),
             'PHASTCONS_SCORE': cnv_df['PHASTCONS_SCORE'].min()
-        })
+        }
+        cnv_df.astype({x:float for x in na_vals.keys()}).astype({'CLINVAR_DENSITY':int})
+        cnv_df = cnv_df.fillna(na_vals)
 
         cols_to_normalize = [
-            'BP_LEN','GENE_COUNT','DISEASE_COUNT','CENT_DIST','%HI','pLI',
-            'LOEUF','GC_CONTENT','POP_FREQ','CLINVAR_DENSITY','PHYLOP_SCORE',
-            'PHASTCONS_SCORE']
+            'BP_LEN','GENE_COUNT','DISEASE_COUNT','EXON_COUNT','REG_COUNT',
+            'CENT_DIST','TEL_DIST','%HI','pLI', 'LOEUF','GC_CONTENT','POP_FREQ',
+            'CLINVAR_DENSITY','PHYLOP_SCORE','PHASTCONS_SCORE']
 
         hs_ts_cols = []
         hi_ts = ['HI','TS']
@@ -589,7 +606,7 @@ class FeatureBuilder:
 
 
         bar_widgets[0] = progressbar.FormatLabel('Feature generation complete')
-        bar.update(12)
+        bar.update(15)
         bar.finish()
 
         cols = ['CHROMOSOME','START','END','CHANGE'] 

@@ -5,5 +5,8 @@ CNVoyant/data/*
 CNVoyant/liftover/temp
 !CNVoyant/data/hi_ts_regions.csv
 !CNVoyant/data/gene_positions.csv
-!CNVoyant/data/gnomad4.csv.gz
+!CNVoyant/data/gnomad4.bed.gz
+!CNVoyant/data/exons.bed
+!CNVoyant/data/gnomad_frequencies.csv
+!CNVoyant/data/reg_regions.bed
 *.cpython*
