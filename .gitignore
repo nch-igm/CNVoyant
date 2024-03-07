@@ -1,7 +1,7 @@
 dist
 CNVoyant.egg-info
 build
-CNVoyant/data/*
+!CNVoyant/data/*
 CNVoyant/liftover/temp
 CNVoyant-*
 *.cpython*
