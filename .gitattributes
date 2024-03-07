@@ -1,2 +1,4 @@
 CNVoyant/classifier/models/del_model.pickle filter=lfs diff=lfs merge=lfs -text
 CNVoyant/classifier/models/dup_model.pickle filter=lfs diff=lfs merge=lfs -text
+CNVoyant/data/phylop_mvg_avg.bw filter=lfs diff=lfs merge=lfs -text
+CNVoyant/data/phastcons_mvg_avg.bw filter=lfs diff=lfs merge=lfs -text

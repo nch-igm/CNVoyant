@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name="CNVoyant",
-    version="1.0.18",
+    version="1.0.22",
     author="Rob Schuetz",
     author_email="robert.schuetz@nationwidechildrens.org",
     description="Copy Number Variant Pathogenicity Classifier",
@@ -43,6 +43,8 @@ setup(
         # 'setuptools==65.6.3',
         # 'xgboost',
         'pyvcf3',
+        'pyBigWig',
+        'pybedtools',
         'scikit-learn==1.3.2',
         'pickleshare',
         'uuid',

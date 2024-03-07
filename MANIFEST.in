@@ -1,5 +1,7 @@
-include CNVoyant/data/hi_ti_gene.csv
-include CNVoyant/data/gene_positions.csv
-include CNVoyant/data/gnomad4.csv.gz
+include CNVoyant/data/*
 include CNVoyant/liftover/paths.json
-include CNVoyant/classifier/models/*
+include CNVoyant/classifier/models/scalers.pickle
+exclude CNVoyant/classifier/models/dup_model.pickle
+exclude CNVoyant/classifier/models/del_model.pickle
+exclude CNVoyant/data/phylop_mvg_avg.bw
+exclude CNVoyant/data/phastcons_mvg_avg.bw

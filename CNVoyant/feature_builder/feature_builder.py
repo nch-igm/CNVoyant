@@ -14,7 +14,12 @@ import vcf
 import pyBigWig
 import pybedtools
 from ..liftover.liftover import get_liftover_positions
-pd.set_option('future.no_silent_downcasting', True)
+
+# Set pandas options
+try:
+    pd.set_option('future.no_silent_downcasting', True)
+except:
+    pass
 
 
 class FeatureBuilder:
@@ -72,7 +77,7 @@ class FeatureBuilder:
         worker(f"{os.path.join(self.conda_bin, 'tabix')} -f {self.temp_clinvar_path}")
 
         # Limit exome data
-        self.exome_path = os.path.join(self.package_data_dir, 'exons.bed')
+        self.exome_path = os.path.join(self.data_dir, 'exons.bed')
         self.temp_exome_path = os.path.join(self.temp_data_dir, 'exons.bed')
         a = pybedtools.BedTool(self.exome_path)
         a.intersect(self.vars_chr_bed, u = True).saveas(self.temp_exome_path)

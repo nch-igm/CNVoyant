@@ -57,12 +57,22 @@ class DependencyBuilder:
         """
         Download a necessary file from the CNVoyant Git LFS-enabled repository.
         """
+        
+        # Get models
         for variant_type in ['del','dup']:
-            
             file_path = os.path.join('CNVoyant','classifier','models',f'{variant_type}_model.pickle')
             output = os.path.join(self.data_dir, os.path.basename(file_path))
             url = f"{os.path.join(self.repo_url,'blob','main',file_path)}?raw=true"
             self.download_file(url, output)
+
+        # Get conservation bigwig files
+        for conservation_type in ['phastcons','phylop']:
+            file_path = os.path.join('CNVoyant','data',f'{conservation_type}_mvg_avg.bw')
+            output = os.path.join(self.data_dir, os.path.basename(file_path))
+            url = f"{os.path.join(self.repo_url,'blob','main',file_path)}?raw=true"
+            self.download_file(url, output)
+
+        
 
 
 
@@ -107,6 +117,19 @@ class DependencyBuilder:
             # # Parse gnomAD
             # self.get_gnomad_frequencies(gnomad_path, gnomad_df_path)
 
+
+    def build_exon_db(self):
+        """
+        exon data is needed in order to generate exon counts for 
+        the indicated CNVs. It is larger when unzipped (~11MB). 
+        """
+        gnomad_path = os.path.join(self.package_data_dir,'exons.bed.gz')
+        gnomad_df_path = os.path.join(self.data_dir, 'exons.bed')
+        if not os.path.exists(gnomad_df_path):
+            
+            df = pd.read_csv(gnomad_path, sep = '\t')
+            df.to_csv(gnomad_df_path, sep = '\t', index = False, header = None)
+    
 
     def get_reference(self):
         """
@@ -284,7 +307,7 @@ class DependencyBuilder:
 
         # Intialize progress bar
         bar_widgets = [progressbar.FormatLabel('Intializing'), ' ', progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage(), ' ', progressbar.Timer()]
-        bar = progressbar.ProgressBar(maxval=8, \
+        bar = progressbar.ProgressBar(maxval=9, \
             widgets=bar_widgets)
         bar.start()
 
@@ -325,7 +348,12 @@ class DependencyBuilder:
 
         # Download conservation scores
         self.get_cons_scores()
-        bar_widgets[0] = progressbar.FormatLabel('Dependencies ready')
+        bar_widgets[0] = progressbar.FormatLabel('Unpacking exon bed')
         bar.update(8)
+
+        # Unpack exons
+        self.build_exon_db()
+        bar_widgets[0] = progressbar.FormatLabel('Dependencies ready')
+        bar.update(9)
 
         bar.finish()
