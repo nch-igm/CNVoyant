@@ -65,13 +65,6 @@ class DependencyBuilder:
             url = f"{os.path.join(self.repo_url,'blob','main',file_path)}?raw=true"
             self.download_file(url, output)
 
-        # Get conservation bigwig files
-        for conservation_type in ['phastcons','phylop']:
-            file_path = os.path.join('CNVoyant','data',f'{conservation_type}_mvg_avg.bw')
-            output = os.path.join(self.data_dir, os.path.basename(file_path))
-            url = f"{os.path.join(self.repo_url,'blob','main',file_path)}?raw=true"
-            self.download_file(url, output)
-
         
 
 
@@ -160,8 +153,8 @@ class DependencyBuilder:
         #     'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phyloP100way.wib',
         #     'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phastCons100way.txt.gz',
         #     'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phyloP100way.txt.gz',
-              'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/phyloP100way/hg38.phyloP100way.bw',
-              'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/phastCons100way/hg38.phastCons100way.bw'
+            's3://nch/bucket/phylop_mvg_avg.bw',
+            's3://nch/bucket/phastcons_mvg_avg.bw'
         ]
 
         for cl in conservation_links:
