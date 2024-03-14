@@ -55,9 +55,11 @@ class FeatureBuilder:
 
         # Output variants for limiting databases
         self.vars_bed = os.path.join(self.temp_data_dir,'vars.bed')
-        self.vars_chr_bed = os.path.join(self.temp_data_dir,'vars_chr.bed')
+        self.variant_df['CHROMOSOME'] = self.variant_df['CHROMOSOME'].apply(lambda x: x[3:] if re.search('chr',x) else x)
         self.variant_df[['CHROMOSOME','START','END']].drop_duplicates().to_csv(self.vars_bed, sep = '\t', index = False, header = None)
-        self.variant_df['CHROMOSOME'] = self.variant_df['CHROMOSOME'].apply(lambda x: f"chr{x}")
+        
+        self.vars_chr_bed = os.path.join(self.temp_data_dir,'vars_chr.bed')
+        self.variant_df['CHROMOSOME'] = self.variant_df['CHROMOSOME'].apply(lambda x: f"chr{x}" if not re.search('chr',x) else x)
         self.variant_df[['CHROMOSOME','START','END']].drop_duplicates().to_csv(self.vars_chr_bed, sep = '\t', index = False, header = None)
         
         # Limit gnomAD
@@ -106,25 +108,37 @@ class FeatureBuilder:
         self.mim2gene = self.mim2gene.astype({'GeneID': int})
         self.mim2gene.columns = ['OMIM ID'] + self.mim2gene.columns[1:].to_list()
 
-        self.gnomadSV_df = pd.read_csv(self.temp_gnomad_path, sep = '\t')
-        self.gnomadSV_df.columns = ['CHROMOSOME','START','END','TYPE','POP_FREQ']
-        self.gnomadSV_df = self.gnomadSV_df.astype({'CHROMOSOME': str})
-        # self.gnomadSV_df['CHROMOSOME'] = self.gnomadSV_df['CHROMOSOME'].str[3:]
-        self.gnomadSV = {t: {chrom: self.gnomadSV_df[(self.gnomadSV_df['CHROMOSOME'] == chrom) & (self.gnomadSV_df['TYPE'] == t)] for chrom in self.gnomadSV_df['CHROMOSOME'].unique()} for t in ['DEL','DUP']}
+        try:
+            self.gnomadSV_df = pd.read_csv(self.temp_gnomad_path, sep = '\t')
+            self.gnomadSV_df.columns = ['CHROMOSOME','START','END','TYPE','POP_FREQ']
+            self.gnomadSV_df = self.gnomadSV_df.astype({'CHROMOSOME': str})
+            # self.gnomadSV_df['CHROMOSOME'] = self.gnomadSV_df['CHROMOSOME'].str[3:]
+            self.gnomadSV = {t: {chrom: self.gnomadSV_df[(self.gnomadSV_df['CHROMOSOME'] == chrom) & (self.gnomadSV_df['TYPE'] == t)] for chrom in self.gnomadSV_df['CHROMOSOME'].unique()} for t in ['DEL','DUP']}
+        except:
+            self.gnomadSV = {}
 
-        self.exome_df = pd.read_csv(self.temp_exome_path, sep = '\t')
-        self.exome_df.columns = ['CHROMOSOME','START','END','SENSE','ID']
-        self.exome_df = self.exome_df.astype({'CHROMOSOME': str})
-        # self.gnomadSV_df['CHROMOSOME'] = self.gnomadSV_df['CHROMOSOME'].str[3:]
-        self.exon_data = {chrom: self.exome_df[(self.exome_df['CHROMOSOME'] == chrom)] for chrom in self.exome_df['CHROMOSOME'].unique()}
+        try:
+            self.exome_df = pd.read_csv(self.temp_exome_path, sep = '\t')
+            self.exome_df.columns = ['CHROMOSOME','START','END','SENSE','ID']
+            self.exome_df = self.exome_df.astype({'CHROMOSOME': str})
+            # self.gnomadSV_df['CHROMOSOME'] = self.gnomadSV_df['CHROMOSOME'].str[3:]
+            self.exon_data = {chrom: self.exome_df[(self.exome_df['CHROMOSOME'] == chrom)] for chrom in self.exome_df['CHROMOSOME'].unique()}
+        except:
+            self.exon_data = {}
 
-        self.reg_df = pd.read_csv(self.temp_reg_path, sep = '\t')
-        self.reg_df.columns = ['CHROMOSOME','START','END','ID']
-        self.reg_data = {chrom: self.reg_df[(self.reg_df['CHROMOSOME'] == chrom)] for chrom in self.reg_df['CHROMOSOME'].unique()}
+        try:
+            self.reg_df = pd.read_csv(self.temp_reg_path, sep = '\t')
+            self.reg_df.columns = ['CHROMOSOME','START','END','ID']
+            self.reg_data = {chrom: self.reg_df[(self.reg_df['CHROMOSOME'] == chrom)] for chrom in self.reg_df['CHROMOSOME'].unique()}
+        except:
+            self.reg_data = {}
 
-        self.hi_ts_df = pd.read_csv(os.path.join(self.data_dir, 'hi_ts_parsed.csv'))
-        self.hi_ts_df['CHROMOSOME'] = self.hi_ts_df['CHROMOSOME'].apply(lambda x: f"chr{x}")
-        self.hi_ts = {chrom: self.hi_ts_df[self.hi_ts_df['CHROMOSOME'] == chrom] for chrom in self.hi_ts_df['CHROMOSOME'].unique()}
+        try:
+            self.hi_ts_df = pd.read_csv(os.path.join(self.data_dir, 'hi_ts_parsed.csv'))
+            self.hi_ts_df['CHROMOSOME'] = self.hi_ts_df['CHROMOSOME'].apply(lambda x: f"chr{x}")
+            self.hi_ts = {chrom: self.hi_ts_df[self.hi_ts_df['CHROMOSOME'] == chrom] for chrom in self.hi_ts_df['CHROMOSOME'].unique()}
+        except:
+            self.hi_ts = {}
 
         # Create a breakpoint dataframe to determine chromosome arm length
         self.breakpoint_df = self.centromere_df.merge(self.telomere_df, on = 'CHROMOSOME', suffixes = ('_cen','_tel'))
@@ -293,6 +307,9 @@ class FeatureBuilder:
             intersects with any HS or TS regions, and to what extent.
             """
 
+            if self.hi_ts == {}:
+                return self.null_hi_ts
+
             if row['CHROMOSOME'] not in self.hi_ts.keys():
                 return self.null_hi_ts
 
@@ -336,6 +353,9 @@ class FeatureBuilder:
             in "row". Returns the average of the population frequencies observed 
             in intersecting variants
             """
+
+            if self.gnomadSV == {}:
+                return 0
 
             if row['CHANGE'] not in self.gnomadSV.keys():
                 return 0
@@ -458,6 +478,8 @@ class FeatureBuilder:
             """
             Get the number of exons that are spanned by the CNV
             """
+            if self.exon_data == {}:
+                return 0
 
             if row['CHROMOSOME'] not in self.exon_data.keys():
                 return 0    
@@ -473,10 +495,14 @@ class FeatureBuilder:
 
             return len(df.index)
 
+
         def get_reg_count(row):
             """
             Get the number of regulatory regions that are spanned by the CNV
             """
+
+            if self.reg_data == {}:
+                return 0
 
             if row['CHROMOSOME'] not in self.reg_data.keys():
                 return 0    
@@ -547,7 +573,10 @@ class FeatureBuilder:
         bar.update(9)
 
         # Create reader of ClinVar short variants
-        clinvar_reader = vcf.Reader(filename = self.temp_clinvar_path, compressed=True, encoding='ISO-8859-1')
+        try:
+            clinvar_reader = vcf.Reader(filename = self.temp_clinvar_path, compressed=True, encoding='ISO-8859-1')
+        except:
+            clinvar_reader = None
         cnv_df['CLINVAR_DENSITY'] = cnv_df.apply(get_clinvar_path_density, clinvar_reader = clinvar_reader, axis = 1)
         
         bar_widgets[0] = progressbar.FormatLabel('Calculating conservation scores')

@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name="CNVoyant",
-    version="1.0.22",
+    version="1.0.34",
     author="Rob Schuetz",
     author_email="robert.schuetz@nationwidechildrens.org",
     description="Copy Number Variant Pathogenicity Classifier",
@@ -23,25 +23,11 @@ setup(
     ],
     packages=find_packages(),
     install_requires=[
-        # 'numpy==1.23.4',
-        # 'onnxruntime==1.12.1',
-        # 'pandas==1.5.0',
-        # 'progressbar==2.5',
-        # 'requests==2.28.1',
-        # # 'setuptools==65.6.3',
-        # 'xgboost==1.7.1',
-        # 'pyvcf3==1.0.3',
-        # 'scikit-learn==1.1.1',
-        # 'pickleshare==0.7.5',
-        # 'uuid==1.30',
-        # 'pysam==0.22.0'
         'numpy',
         'onnxruntime',
         'pandas',
         'progressbar',
         'requests',
-        # 'setuptools==65.6.3',
-        # 'xgboost',
         'pyvcf3',
         'pyBigWig',
         'pybedtools',
@@ -51,7 +37,8 @@ setup(
         'pysam',
         'shap',
         'pyarrow',
-        'matplotlib'
+        'matplotlib',
+        'tqdm'
     ],
     python_requires=">=3.6",
     include_package_data=True

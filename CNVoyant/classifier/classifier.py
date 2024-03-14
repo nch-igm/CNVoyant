@@ -11,14 +11,15 @@ import progressbar
 
 class Classifier():
 
-    def __init__(self, model_dir: str, normalize_input = True):
+    def __init__(self, data_dir: str, normalize_input = True):
         self.random_seed = 42
         self.root_path = os.path.dirname(__file__)
         self.retrained = False
         self.dup_model = None
         self.del_model = None
         self.norm = normalize_input
-        self.model_dir = model_dir
+        self.data_dir = data_dir
+        self.model_path = os.path.join(self.data_dir, 'models.pickle')
 
     def train(self, input: pd.DataFrame, label: str):
         """
@@ -65,9 +66,9 @@ class Classifier():
             XY['CLINVAR_DENSITY'] = np.log(XY['CLINVAR_DENSITY'].replace(0,log_null_value))
 
             with open(os.path.join(self.root_path, 'models', 'scalers.pickle'), 'rb') as f:
-                col_scalers = pickle.load(f)
+                self.col_scalers = pickle.load(f)
             for col in feature_cols:
-                XY[col] = col_scalers[col].transform(XY[col].values.reshape(-1,1))
+                XY[col] = self.col_scalers[col].transform(XY[col].values.reshape(-1,1))
 
 
         XY_dup = XY[XY['CHANGE'] == 'DUP']
@@ -178,9 +179,9 @@ class Classifier():
             XY['CLINVAR_DENSITY'] = np.log(XY['CLINVAR_DENSITY'].replace(0,log_null_value))
 
             with open(os.path.join(self.root_path, 'models', 'scalers.pickle'), 'rb') as f:
-                col_scalers = pickle.load(f)
+                self.col_scalers = pickle.load(f)
             for col in feature_cols:
-                XY[col] = col_scalers[col].transform(XY[col].values.reshape(-1,1))
+                XY[col] = self.col_scalers[col].transform(XY[col].values.reshape(-1,1))
 
         XY_dup = XY[XY['CHANGE'] == 'DUP']
         XY_del = XY[XY['CHANGE'] == 'DEL']
@@ -198,11 +199,13 @@ class Classifier():
 
         if not self.retrained:
             
-            with open(os.path.join(self.model_dir, 'del_model.pickle'), 'rb') as f:
-                self.del_calibrated_model = pickle.load(f)
+            with open(self.model_path, 'rb') as f:
+                models = pickle.load(f)
 
-            with open(os.path.join(self.model_dir, 'dup_model.pickle'), 'rb') as f:
-                self.del_calibrated_model = pickle.load(f)
+            self.del_model = models['del_model']
+            self.del_calibrated_model = models['del_calibrated_model']
+            self.dup_model = models['dup_model']
+            self.dup_calibrated_model = models['dup_calibrated_model']
 
         del_pred = self.del_calibrated_model.predict_proba(X_del)
         del_pred = pd.DataFrame(del_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
@@ -212,7 +215,6 @@ class Classifier():
 
         dup_pred = self.dup_calibrated_model.predict_proba(X_dup)
         dup_pred = pd.DataFrame(dup_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
-
 
         bar_widgets[0] = progressbar.FormatLabel('Reformatting and saving predictions')
         bar.update(3)

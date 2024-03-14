@@ -1,5 +1,6 @@
 import os
 import sys
+import tqdm
 import subprocess
 import shlex
 import pandas as pd
@@ -25,6 +26,8 @@ class DependencyBuilder:
         self.gnomadSV_version = gnomadSV_version
         self.repo_url = 'https://github.com/nch-igm/CNVoyant'
 
+        if not os.path.exists(self.data_dir):
+            os.mkdir(self.data_dir)
 
     def worker(self, cmd):
         parsed_cmd = shlex.split(cmd)
@@ -39,34 +42,46 @@ class DependencyBuilder:
         Download a file from `url` and save it locally under `output`.
         The file is downloaded in chunks to save on memory usage.
         """
-        r = requests.get(url)
-        if r.status_code == 200:
-            if binary:
-                with open(output, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
+        if binary:
+
+            r = requests.get(url, stream=True)
+
+            if r.status_code == 200:
+
+                total_size = int(r.headers.get('content-length', 0))
+                block_size = 8192  # Adjust the block size as needed
+
+                with open(output, 'wb') as f, tqdm.tqdm(total=total_size, unit='B', unit_scale=True) as pbar:
+                    for data in r.iter_content(block_size):
+                        f.write(data)
+                        pbar.update(len(data))
+
             else:
+                print(f'Bad url: {url}')
+
+        else:
+
+            r = requests.get(url)
+
+            if r.status_code == 200:
                 with open(output, 'w') as f:
                     f.write(r.text)
-            print(f"File downloaded successfully: {output}")
-        else:
-            print(f'Bad url: {url}')
+            else:
+                print(f'Bad url: {url}')
+
+        print(f"File downloaded successfully: {output}")
 
 
-    def download_lfs_files(self):
+
+    def download_models(self):
         """
-        Download a necessary file from the CNVoyant Git LFS-enabled repository.
+        Downloads the models from a specified URL and saves them to the data directory.
         """
-        
-        # Get models
-        for variant_type in ['del','dup']:
-            file_path = os.path.join('CNVoyant','classifier','models',f'{variant_type}_model.pickle')
-            output = os.path.join(self.data_dir, os.path.basename(file_path))
-            url = f"{os.path.join(self.repo_url,'blob','main',file_path)}?raw=true"
-            self.download_file(url, output)
 
-        
-
+        url = 'https://igm-public-dropbox.s3.us-east-2.amazonaws.com/cnvoyant/models.pickle'
+        output = os.path.join(self.data_dir, os.path.basename(url))  
+        if not os.path.exists(output):
+            self.download_file(url, output, binary=True)
 
 
     def get_gnomad_frequencies(self, vcf_path, output_path):
@@ -148,19 +163,41 @@ class DependencyBuilder:
         around (~5GB).
         """
 
-        conservation_links = [
-        #     'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phastCons100way.wib',
-        #     'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phyloP100way.wib',
-        #     'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phastCons100way.txt.gz',
-        #     'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phyloP100way.txt.gz',
-            's3://nch/bucket/phylop_mvg_avg.bw',
-            's3://nch/bucket/phastcons_mvg_avg.bw'
-        ]
+        # bucket_name = 'igm-public-dropbox'
+        # s3 = boto3.resource('s3')
+        # keys = [
+        # #     'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phastCons100way.wib',
+        # #     'https://hgdownload.soe.ucsc.edu/gbdb/hg38/multiz100way/phyloP100way.wib',
+        # #     'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phastCons100way.txt.gz',
+        # #     'https://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/phyloP100way.txt.gz',
+        #     'cnvoyant/phylop_mvg_avg.bw',
+        #     'cnvoyant/phastcons_mvg_avg.bw'
+        # ]
 
-        for cl in conservation_links:
-            cons_path = os.path.join(self.data_dir, os.path.basename(cl))
-            if not os.path.exists(cons_path):
-                self.download_file(cl, cons_path, binary = True)
+
+
+        # for k in keys:
+        #     try:
+        #         p = os.path.join(self.data_dir, os.path.basename(k))
+        #         if not os.path.exists(p):
+        #             s3.Bucket(bucket_name).download_file(k, p)
+        #     except botocore.exceptions.ClientError as e:
+        #         print(e)
+        #         if e.response['Error']['Code'] == "404":
+        #             print("The object does not exist.")
+        #         else:
+        #             raise
+        
+        links = [
+                'https://igm-public-dropbox.s3.us-east-2.amazonaws.com/cnvoyant/phylop_mvg_avg.bw',
+                'https://igm-public-dropbox.s3.us-east-2.amazonaws.com/cnvoyant/phastcons_mvg_avg.bw'
+                ]
+
+        for link in links:
+            p = os.path.join(self.data_dir, os.path.basename(link))
+            if not os.path.exists(p):
+                self.download_file(link, p, binary = True)
+
 
 
     def build_breakpoints(self):
@@ -300,7 +337,7 @@ class DependencyBuilder:
 
         # Intialize progress bar
         bar_widgets = [progressbar.FormatLabel('Intializing'), ' ', progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage(), ' ', progressbar.Timer()]
-        bar = progressbar.ProgressBar(maxval=9, \
+        bar = progressbar.ProgressBar(maxval=10, \
             widgets=bar_widgets)
         bar.start()
 
@@ -344,9 +381,14 @@ class DependencyBuilder:
         bar_widgets[0] = progressbar.FormatLabel('Unpacking exon bed')
         bar.update(8)
 
+        # Download models
+        self.download_models()
+        bar_widgets[0] = progressbar.FormatLabel('Downloading ML models')
+        bar.update(9)
+
         # Unpack exons
         self.build_exon_db()
         bar_widgets[0] = progressbar.FormatLabel('Dependencies ready')
-        bar.update(9)
+        bar.update(10)
 
         bar.finish()
