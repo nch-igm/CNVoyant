@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name="CNVoyant",
-    version="1.0.34",
+    version="1.1.4",
     author="Rob Schuetz",
     author_email="robert.schuetz@nationwidechildrens.org",
     description="Copy Number Variant Pathogenicity Classifier",
@@ -38,6 +38,7 @@ setup(
         'shap',
         'pyarrow',
         'matplotlib',
+        'seaborn',
         'tqdm'
     ],
     python_requires=">=3.6",

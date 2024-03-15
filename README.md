@@ -89,8 +89,8 @@ from CNVoyant import Explainer
 
 cnv_coordinates = {
     'CHROMOSOME': 'chr3',
-    'START': 179198174,
-    'END': 179211103,
+    'START': 179197182,
+    'END': 179236784,
     'CHANGE': 'DEL'
 }
 

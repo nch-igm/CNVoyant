@@ -19,7 +19,18 @@ class Classifier():
         self.del_model = None
         self.norm = normalize_input
         self.data_dir = data_dir
-        self.model_path = os.path.join(self.data_dir, 'models.pickle')
+
+        # Load pre-trained models
+        with open(os.path.join(self.data_dir, 'models.pickle'), 'rb') as f:
+            models = pickle.load(f)
+        self.del_model = models['del_model']
+        self.del_calibrated_model = models['del_calibrated_model']
+        self.dup_model = models['dup_model']
+        self.dup_calibrated_model = models['dup_calibrated_model']
+
+        # Load column scalers
+        with open(os.path.join(self.root_path, 'models', 'scalers.pickle'), 'rb') as f:
+            self.col_scalers = pickle.load(f)
 
     def train(self, input: pd.DataFrame, label: str):
         """
@@ -65,8 +76,6 @@ class Classifier():
             XY['DISEASE_COUNT'] = np.log(XY['DISEASE_COUNT'].replace(0,log_null_value))
             XY['CLINVAR_DENSITY'] = np.log(XY['CLINVAR_DENSITY'].replace(0,log_null_value))
 
-            with open(os.path.join(self.root_path, 'models', 'scalers.pickle'), 'rb') as f:
-                self.col_scalers = pickle.load(f)
             for col in feature_cols:
                 XY[col] = self.col_scalers[col].transform(XY[col].values.reshape(-1,1))
 
@@ -91,6 +100,7 @@ class Classifier():
             'VUS': 1,
             'Pathogenic': 2
         }
+        inverted_map = {v: k for k, v in map.items()}
 
         Y_del = np.array(Y_del.apply(get_map, map = map))
         Y_dup = np.array(Y_dup.apply(get_map, map = map))
@@ -106,8 +116,23 @@ class Classifier():
             'max_features': 'sqrt','max_depth': 20,'criterion': 'gini',
             'class_weight': None,'ccp_alpha': 0.0,'bootstrap': False}
         
+        # Validate training data
+        class_counts = pd.Series(Y_del).value_counts()
+        for i in range(3):  # Insert rows with zero counts if index 0, 1, or 2 are not present
+            if i not in class_counts.index:
+                class_counts.loc[i] = 0
+        class_counts = class_counts.sort_index()
+
+        missing_classes = [inverted_map[i] for i in range(3) if class_counts[i] == 0]
+        if missing_classes:
+            error_message = f"Cannot train deletion model. Classes {missing_classes} do not have at least 1 value."
+            raise ValueError(error_message)
         
-        # Generate models
+        # Determine class counts
+        min_class_count = class_counts.min()
+        n_folds = 5 if class_counts.min() > 5 else class_counts.min()
+
+        # Train base model
         bar.update(1)
         bar_widgets[0] = progressbar.FormatLabel('Training deletion model')
         self.del_model = ensemble.RandomForestClassifier(
@@ -115,20 +140,45 @@ class Classifier():
             random_state = self.random_seed
         ).fit(X_del, Y_del)
 
-        self.del_calibrated_model = CalibratedClassifierCV(self.del_model, method='isotonic')
-        self.del_calibrated_model.fit(X_del, Y_del)
+        # Calibrate models
+        if n_folds >= 2:
+            self.del_calibrated_model = CalibratedClassifierCV(self.del_model, method='isotonic', cv = n_folds)
+            self.del_calibrated_model.fit(X_del, Y_del)
+        else:
+            print('< 3 instances of each class. Not calibrating deletion model')
+            self.del_calibrated_model = self.del_model
 
         bar.update(2)
         bar_widgets[0] = progressbar.FormatLabel('Training duplication model')
 
+        # Validate training data
+        class_counts = pd.Series(Y_dup).value_counts()
+        for i in range(3):  # Insert rows with zero counts if index 0, 1, or 2 are not present
+            if i not in class_counts.index:
+                class_counts.loc[i] = 0
+        class_counts = class_counts.sort_index()
+
+        missing_classes = [inverted_map[i] for i in range(3) if class_counts[i] == 0]
+        if missing_classes:
+            error_message = f"Cannot train duplication model. Classes {missing_classes} do not have at least 1 value."
+            raise ValueError(error_message)
+
+        # Determine class counts
+        min_class_count = class_counts.min()
+        n_folds = 5 if class_counts.min() > 5 else class_counts.min()
+
+        # Train base model
         self.dup_model = ensemble.RandomForestClassifier(
             **rf_dup,
             random_state = self.random_seed
         ).fit(X_dup, Y_dup)
 
-        self.dup_calibrated_model = CalibratedClassifierCV(self.dup_model, method='isotonic')
-        self.dup_calibrated_model.fit(X_dup, Y_dup)
-
+        if n_folds >= 2:
+            self.dup_calibrated_model = CalibratedClassifierCV(self.dup_model, method='isotonic', cv = n_folds)
+            self.dup_calibrated_model.fit(X_dup, Y_dup)
+        else:
+            print('< 3 instances of each class. Not calibrating duplication model')
+            self.dup_calibrated_model = self.dup_model
 
         bar.update(3)
         bar_widgets[0] = progressbar.FormatLabel('Model training complete')
@@ -178,8 +228,6 @@ class Classifier():
             XY['DISEASE_COUNT'] = np.log(XY['DISEASE_COUNT'].replace(0,log_null_value))
             XY['CLINVAR_DENSITY'] = np.log(XY['CLINVAR_DENSITY'].replace(0,log_null_value))
 
-            with open(os.path.join(self.root_path, 'models', 'scalers.pickle'), 'rb') as f:
-                self.col_scalers = pickle.load(f)
             for col in feature_cols:
                 XY[col] = self.col_scalers[col].transform(XY[col].values.reshape(-1,1))
 
@@ -197,24 +245,26 @@ class Classifier():
         bar_widgets[0] = progressbar.FormatLabel('Obtaining DEL predictions')
         bar.update(1)
 
-        if not self.retrained:
-            
-            with open(self.model_path, 'rb') as f:
-                models = pickle.load(f)
+        if len(X_del.index) > 0:
 
-            self.del_model = models['del_model']
-            self.del_calibrated_model = models['del_calibrated_model']
-            self.dup_model = models['dup_model']
-            self.dup_calibrated_model = models['dup_calibrated_model']
+            del_pred = self.del_calibrated_model.predict_proba(X_del)
+            del_pred = pd.DataFrame(del_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
 
-        del_pred = self.del_calibrated_model.predict_proba(X_del)
-        del_pred = pd.DataFrame(del_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
+        else:
+
+            del_pred = pd.DataFrame(columns = ['BENIGN','VUS','PATHOGENIC'])
 
         bar_widgets[0] = progressbar.FormatLabel('Obtaining DUP predictions')
         bar.update(2)
 
-        dup_pred = self.dup_calibrated_model.predict_proba(X_dup)
-        dup_pred = pd.DataFrame(dup_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
+        if len(X_dup.index) > 0:
+
+            dup_pred = self.dup_calibrated_model.predict_proba(X_dup)
+            dup_pred = pd.DataFrame(dup_pred).rename(columns = {0:'BENIGN',1:'VUS',2:'PATHOGENIC'})
+        
+        else:
+
+            dup_pred = pd.DataFrame(columns = ['BENIGN','VUS','PATHOGENIC'])
 
         bar_widgets[0] = progressbar.FormatLabel('Reformatting and saving predictions')
         bar.update(3)

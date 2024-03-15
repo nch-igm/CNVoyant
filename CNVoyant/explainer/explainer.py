@@ -155,6 +155,9 @@ class Explainer:
         
         # Calculate SHAP values for the input data
         shap_values = explainer.shap_values(data_frame)
+        shap_values = np.array(shap_values)
+        if shap_values.shape[0] == 1:
+            shap_values = shap_values.transpose((2, 0, 1))
 
         label_dict = {
             0:'Benign',
@@ -170,7 +173,8 @@ class Explainer:
                 matplotlib=True,
                 text_rotation=15,
                 figsize=(15,5),
-                show=False
+                show=False,
+                contribution_threshold=0.075
             )
         
             plt.title(v,fontdict={'fontsize':30,'fontweight':'bold'}, pad = 120)
